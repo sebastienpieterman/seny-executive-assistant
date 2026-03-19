@@ -159,12 +159,11 @@ async def sync_upcoming_calendar_nudges():
                         event_id = event.get('id', '')
                         if not event_id or has_event_nudge_sequence(user_id, event_id):
                             continue
-                        # Detect all-day: Google returns {'date': ...} vs {'dateTime': ...}
-                        start_info = event.get('start', {})
-                        is_all_day = 'date' in start_info and 'dateTime' not in start_info
-                        event_start = start_info.get('dateTime') or start_info.get('date', '')
-                        event_end_info = event.get('end', {})
-                        event_end = event_end_info.get('dateTime') or event_end_info.get('date')
+                        # CalendarService._format_event() returns start/end as strings,
+                        # is_all_day as bool — NOT raw Google API dicts.
+                        event_start = event.get('start', '')
+                        event_end = event.get('end')
+                        is_all_day = event.get('is_all_day', False)
                         attendees = event.get('attendees', [])
                         attendees_json = json.dumps([a.get('email', '') for a in attendees]) if attendees else None
                         description = event.get('description') or event.get('summary', '')
@@ -175,10 +174,15 @@ async def sync_upcoming_calendar_nudges():
                             is_all_day, user_tz, day_start
                         )
                         if nudge_rows:
-                            schedule_event_nudge_sequence(
+                            created = schedule_event_nudge_sequence(
                                 user_id, event_id, title, event_start, event_end,
                                 is_all_day, attendees_json, description, nudge_rows
                             )
+                            if created:
+                                logger.info(
+                                    "sync_upcoming_calendar_nudges: created %d-row sequence for user=%s event='%s' start=%s",
+                                    len(nudge_rows), user_id, title[:40], event_start
+                                )
             except Exception as e:
                 logger.error("sync_upcoming_calendar_nudges: Google error user=%s: %s", user_id, repr(e))
 
