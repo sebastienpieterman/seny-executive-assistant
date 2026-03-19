@@ -565,16 +565,47 @@ class PredictiveService:
         """
         now = datetime.now(timezone.utc)
         start_str = event.get('start', '')
+        end_str = event.get('end', '')
+
+        # Resolve user timezone for display
+        prefs = get_nudge_preferences(self.user_id)
+        tz_str = prefs.get('digest_timezone', 'America/Chicago')
+        try:
+            user_tz = ZoneInfo(tz_str)
+        except Exception:
+            user_tz = ZoneInfo('America/Chicago')
+
         try:
             event_start = datetime.fromisoformat(start_str)
             if event_start.tzinfo is None:
                 event_start = event_start.replace(tzinfo=timezone.utc)
             minutes_until = int((event_start - now).total_seconds() / 60)
+            local_start = event_start.astimezone(user_tz)
+            start_display = local_start.strftime('%-I:%M %p')
         except (ValueError, TypeError):
             minutes_until = 60  # Fallback
+            start_display = None
+
+        # Convert end time to user timezone
+        end_display = None
+        if end_str:
+            try:
+                event_end = datetime.fromisoformat(end_str)
+                if event_end.tzinfo is None:
+                    event_end = event_end.replace(tzinfo=timezone.utc)
+                local_end = event_end.astimezone(user_tz)
+                end_display = local_end.strftime('%-I:%M %p')
+            except (ValueError, TypeError):
+                pass
 
         summary = event.get('summary', 'Meeting')
-        title = f"📅 Meeting in {minutes_until}min: {summary}"
+
+        if start_display and end_display:
+            title = f"📅 {summary} at {start_display} (in {minutes_until}min)"
+        elif start_display:
+            title = f"📅 {summary} at {start_display} (in {minutes_until}min)"
+        else:
+            title = f"📅 Meeting in {minutes_until}min: {summary}"
 
         # --- Section 1: Attendees ---
         attendee_lines, tracked_person_ids = await self._resolve_attendees(event)
@@ -586,6 +617,14 @@ class PredictiveService:
         followup_lines = self._get_followups(tracked_person_ids)
 
         # --- Assemble body ---
+        # Event time in user's timezone
+        if start_display and end_display:
+            time_text = f"🕐 {start_display} – {end_display}"
+        elif start_display:
+            time_text = f"🕐 {start_display}"
+        else:
+            time_text = None
+
         if attendee_lines:
             attendees_text = "📋 Attendees: " + ", ".join(attendee_lines)
         else:
@@ -603,7 +642,8 @@ class PredictiveService:
 
         footer = '💬 Reply "skip" to dismiss future briefings for this meeting type'
 
-        body = "\n\n".join([attendees_text, context_text, followup_text, footer])
+        sections = [s for s in [time_text, attendees_text, context_text, followup_text, footer] if s]
+        body = "\n\n".join(sections)
 
         # Cap at 1000 chars
         if len(body) > 1000:
@@ -653,6 +693,9 @@ class PredictiveService:
         """
         Use SemanticSearchService to find relevant notes, items, and conversations.
 
+        Filters results to only include items from the last 7 days to avoid
+        surfacing stale context (e.g. old recurring meeting notes).
+
         Returns:
             List of up to 3 bullet lines, or [] if embeddings are disabled.
         """
@@ -668,12 +711,20 @@ class PredictiveService:
                 user_id=self.user_id,
                 query=query,
                 entity_types=['items', 'notes', 'conversations'],
-                n_results=5,
+                n_results=10,  # fetch more so we still have 3 after recency filter
                 threshold=1.3,
             )
 
+            # Recency filter: only include results from the last 7 days
+            cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+            recent_results = []
+            for r in results:
+                created = self._get_entity_created_at(r.get('entity_type'), r.get('id'))
+                if created is None or created >= cutoff:
+                    recent_results.append(r)
+
             lines = []
-            for r in results[:3]:
+            for r in recent_results[:3]:
                 entity_type = r.get('entity_type', 'item')
                 text = r.get('text', '')[:120]
                 lines.append(f"• [{entity_type}]: {text}")
@@ -683,6 +734,58 @@ class PredictiveService:
         except Exception as e:
             logger.debug("Meeting prep: semantic search failed: %r", e)
             return []
+
+    def _get_entity_created_at(self, entity_type: str, doc_id: str) -> datetime | None:
+        """
+        Look up the creation date for a semantic search result by its entity type and doc ID.
+
+        Doc IDs follow the pattern: item_123, note_456, conv_789.
+        Returns a timezone-aware datetime or None if lookup fails.
+        """
+        if not entity_type or not doc_id:
+            return None
+
+        # Parse numeric ID from doc_id (e.g. "item_123" → 123)
+        parts = doc_id.rsplit('_', 1)
+        if len(parts) != 2:
+            return None
+        try:
+            entity_id = int(parts[1])
+        except (ValueError, TypeError):
+            return None
+
+        table_map = {
+            'items': ('item_classifications', 'id'),
+            'notes': ('notes', 'id'),
+            'conversations': ('conversations', 'id'),
+        }
+
+        table_info = table_map.get(entity_type)
+        if not table_info:
+            return None
+
+        table_name, id_col = table_info
+
+        try:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute(f"""
+                    SELECT created_at FROM {table_name}
+                    WHERE {id_col} = %s AND user_id = %s
+                    LIMIT 1
+                """, (entity_id, self.user_id))
+                row = cursor.fetchone()
+                if row:
+                    created_at = row['created_at'] if isinstance(row, dict) else row[0]
+                    if isinstance(created_at, str):
+                        created_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                    if created_at and created_at.tzinfo is None:
+                        created_at = created_at.replace(tzinfo=timezone.utc)
+                    return created_at
+        except Exception as e:
+            logger.debug("Recency filter: failed to look up %s/%s: %r", entity_type, doc_id, e)
+
+        return None
 
     def _get_followups(self, person_ids: list[int]) -> list[str]:
         """

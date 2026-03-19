@@ -477,6 +477,15 @@ def init_db() -> None:
         except Exception:
             pass  # Already exists
 
+        # nudge_smart_dedup: Use Haiku to detect topic-level duplicates when dismissing nudges
+        try:
+            cursor.execute(
+                "ALTER TABLE user_settings ADD COLUMN nudge_smart_dedup INTEGER DEFAULT 1"
+            )
+            print("[INIT_DB] Migration: added nudge_smart_dedup column")
+        except Exception:
+            pass  # Already exists
+
         # Migration: Add channel exclusion columns
         # slack_excluded_channels: JSON array of Slack channel IDs to exclude from scanner
         try:
@@ -1302,6 +1311,28 @@ def init_db() -> None:
             ON ignored_senders(user_id)
         """)
 
+        # nudge_suppressed_senders table - Senders whose nudges are auto-suppressed.
+        # Unlike ignored_senders (which suppresses scanning entirely), this only
+        # prevents nudge creation for a given sender while still scanning their messages.
+        # Populated automatically when a user repeatedly dismisses nudges from the same sender.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS nudge_suppressed_senders (
+                id BIGSERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                source_type TEXT NOT NULL,
+                sender_identifier TEXT NOT NULL,
+                reason TEXT,
+                suppressed_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(user_id, source_type, sender_identifier),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_nudge_suppressed_senders_user
+            ON nudge_suppressed_senders(user_id)
+        """)
+
         timings['email_feedback'] = time.time() - section_start
         print(f"[INIT_DB] Phase 18 Email Feedback: {timings['email_feedback']:.2f}s")
 
@@ -1871,6 +1902,7 @@ def init_db() -> None:
                 nudge_drip_interval_minutes INTEGER DEFAULT 15,
                 nudge_last_drip_at TIMESTAMP,
                 nudge_quiet_skip_weekend INTEGER DEFAULT 0,
+                nudge_smart_dedup INTEGER DEFAULT 1,
                 slack_excluded_channels TEXT,
                 telegram_excluded_chats TEXT,
                 scanner_gmail_interval_minutes INTEGER DEFAULT 15,
@@ -8706,7 +8738,8 @@ def get_nudge_preferences(user_id: int) -> dict:
                    nudge_max_urgent_per_hour, nudge_batch_interval_minutes,
                    nudge_channels, nudge_batch_channel, nudge_last_batch_at, digest_timezone,
                    nudge_drip_interval_minutes, nudge_last_drip_at,
-                   pending_action_notification_channel, nudge_quiet_skip_weekend
+                   pending_action_notification_channel, nudge_quiet_skip_weekend,
+                   nudge_smart_dedup
             FROM user_settings
             WHERE user_id = %s
         """, (user_id,))
@@ -8729,6 +8762,7 @@ def get_nudge_preferences(user_id: int) -> dict:
                 'nudge_last_drip_at': None,
                 'pending_action_notification_channel': 'none',
                 'nudge_quiet_skip_weekend': False,
+                'nudge_smart_dedup': True,
             }
 
         return {
@@ -8745,6 +8779,7 @@ def get_nudge_preferences(user_id: int) -> dict:
             'nudge_last_drip_at': row['nudge_last_drip_at'],
             'pending_action_notification_channel': row['pending_action_notification_channel'] or 'none',
             'nudge_quiet_skip_weekend': bool(row['nudge_quiet_skip_weekend']) if row['nudge_quiet_skip_weekend'] is not None else False,
+            'nudge_smart_dedup': bool(row['nudge_smart_dedup']) if row.get('nudge_smart_dedup') is not None else True,
         }
 
 
@@ -8762,6 +8797,7 @@ def update_nudge_preferences(
     nudge_last_drip_at: str = None,
     pending_action_notification_channel: str = None,
     nudge_quiet_skip_weekend: int = None,
+    nudge_smart_dedup: int = None,
 ) -> bool:
     """
     Update nudge preferences for a user.
@@ -8833,6 +8869,9 @@ def update_nudge_preferences(
             if nudge_quiet_skip_weekend is not None:
                 updates.append("nudge_quiet_skip_weekend = %s")
                 params.append(nudge_quiet_skip_weekend)
+            if nudge_smart_dedup is not None:
+                updates.append("nudge_smart_dedup = %s")
+                params.append(nudge_smart_dedup)
 
             if not updates:
                 return True  # Nothing to update
@@ -9799,6 +9838,222 @@ def remove_ignored_sender(user_id: int, source_type: str, sender_identifier: str
     except Exception as e:
         _email_feedback_logger.error("Failed to remove ignored sender: %s", repr(e))
         return False
+
+
+# ============================================================================
+# Nudge-Suppressed Senders Functions
+# ============================================================================
+# These functions manage sender-level nudge suppression.  Unlike ignored_senders
+# (which prevents scanning entirely), nudge suppression only prevents nudge
+# creation while still scanning the sender's messages for context and digest.
+
+
+def is_sender_nudge_suppressed(
+    user_id: int,
+    source_type: str,
+    sender_identifier: str,
+) -> bool:
+    """
+    Check if a sender is nudge-suppressed for a user.
+
+    Args:
+        user_id: User's unique identifier
+        source_type: Source type (gmail, slack, telegram)
+        sender_identifier: Sender email/ID to check
+
+    Returns:
+        True if sender is nudge-suppressed, False otherwise (including on error)
+    """
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT 1 FROM nudge_suppressed_senders
+                WHERE user_id = %s AND source_type = %s AND sender_identifier = %s
+                LIMIT 1
+            """, (user_id, source_type, sender_identifier))
+            return cursor.fetchone() is not None
+    except Exception as e:
+        logger.error("Failed to check nudge-suppressed sender: %s", repr(e))
+        return False  # Fail open — never block nudge delivery on error
+
+
+def add_nudge_suppressed_sender(
+    user_id: int,
+    source_type: str,
+    sender_identifier: str,
+    reason: Optional[str] = None,
+) -> bool:
+    """
+    Add a sender to the user's nudge suppression list.
+
+    Args:
+        user_id: User's unique identifier
+        source_type: Source type (gmail, slack, telegram)
+        sender_identifier: Sender email/ID to suppress
+        reason: Optional human-readable reason (e.g. "3 dismissed nudges in 30d")
+
+    Returns:
+        True if added (or already exists), False on error
+    """
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO nudge_suppressed_senders (
+                    user_id, source_type, sender_identifier, reason
+                ) VALUES (%s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+            """, (user_id, source_type, sender_identifier, reason))
+
+            if cursor.rowcount > 0:
+                logger.info(
+                    "Added nudge-suppressed sender for user %d: %s/%s (reason: %s)",
+                    user_id, source_type, sender_identifier, reason
+                )
+            return True
+    except Exception as e:
+        logger.error("Failed to add nudge-suppressed sender: %s", repr(e))
+        return False
+
+
+def get_nudge_suppressed_senders(
+    user_id: int,
+    source_type: Optional[str] = None,
+) -> list[dict]:
+    """
+    Get list of nudge-suppressed senders for a user.
+
+    Args:
+        user_id: User's unique identifier
+        source_type: Optional filter by source type
+
+    Returns:
+        List of dicts with source_type, sender_identifier, reason, suppressed_at
+    """
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            if source_type:
+                cursor.execute("""
+                    SELECT id, source_type, sender_identifier, reason, suppressed_at
+                    FROM nudge_suppressed_senders
+                    WHERE user_id = %s AND source_type = %s
+                    ORDER BY suppressed_at DESC
+                """, (user_id, source_type))
+            else:
+                cursor.execute("""
+                    SELECT id, source_type, sender_identifier, reason, suppressed_at
+                    FROM nudge_suppressed_senders
+                    WHERE user_id = %s
+                    ORDER BY suppressed_at DESC
+                """, (user_id,))
+            return [dict(row) for row in cursor.fetchall()]
+    except Exception as e:
+        logger.error("Failed to get nudge-suppressed senders: %s", repr(e))
+        return []
+
+
+def remove_nudge_suppressed_sender(
+    user_id: int,
+    source_type: str,
+    sender_identifier: str,
+) -> bool:
+    """
+    Remove a sender from the user's nudge suppression list.
+
+    Args:
+        user_id: User's unique identifier
+        source_type: Source type (gmail, slack, telegram)
+        sender_identifier: Sender email/ID to un-suppress
+
+    Returns:
+        True if removed, False on error or not found
+    """
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                DELETE FROM nudge_suppressed_senders
+                WHERE user_id = %s AND source_type = %s AND sender_identifier = %s
+            """, (user_id, source_type, sender_identifier))
+            return cursor.rowcount > 0
+    except Exception as e:
+        logger.error("Failed to remove nudge-suppressed sender: %s", repr(e))
+        return False
+
+
+def get_sender_for_detected_action(detected_action_id: int) -> Optional[tuple]:
+    """
+    Resolve the sender identity for a detected_action by JOINing through
+    detected_actions -> scanned_items and parsing source_metadata JSON.
+
+    Sender extraction per source:
+        - Gmail:    source_metadata["from"]          -> (gmail, email_address)
+        - Slack:    source_metadata["username"]       -> (slack, username)
+        - Telegram: source_metadata["sender_name"]   -> (telegram, sender_name)
+
+    Returns:
+        (source_type, sender_identifier) tuple, or None if not resolvable.
+    """
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT si.source, si.source_metadata
+                FROM detected_actions da
+                JOIN scanned_items si ON da.scanned_item_id = si.id
+                WHERE da.id = %s
+            """, (detected_action_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            row = dict(row) if hasattr(row, 'keys') else {'source': row[0], 'source_metadata': row[1]}
+            source = row.get('source', '')
+            raw_meta = row.get('source_metadata')
+            if not raw_meta:
+                return None
+
+            import json as _json
+            try:
+                meta = _json.loads(raw_meta) if isinstance(raw_meta, str) else raw_meta
+            except (ValueError, TypeError):
+                return None
+
+            if not isinstance(meta, dict):
+                return None
+
+            # Gmail: "from" field contains the sender email
+            if source == 'gmail':
+                sender = (meta.get('from') or '').strip().lower()
+                if sender:
+                    return ('gmail', sender)
+
+            # Slack: "username" field (fallback to "user_id")
+            elif source == 'slack':
+                sender = (meta.get('username') or meta.get('user_id') or '').strip()
+                if sender:
+                    return ('slack', sender)
+
+            # Telegram: "sender_name" field (fallback to "sender_id")
+            elif source == 'telegram':
+                sender = (meta.get('sender_name') or '').strip()
+                if not sender:
+                    sid = meta.get('sender_id')
+                    if sid is not None:
+                        sender = str(sid)
+                if sender:
+                    return ('telegram', sender)
+
+            return None
+
+    except Exception as e:
+        logger.error(
+            "Failed to resolve sender for detected_action %d: %s",
+            detected_action_id, repr(e),
+        )
+        return None
 
 
 # ============================================================================

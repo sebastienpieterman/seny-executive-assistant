@@ -41,6 +41,7 @@ class NudgePreferencesUpdate(BaseModel):
     nudge_channels: Optional[List[str]] = None
     nudge_batch_channel: Optional[str] = None
     nudge_quiet_skip_weekend: Optional[bool] = None
+    nudge_smart_dedup: Optional[bool] = None
     pending_action_notification_channel: Optional[str] = None
 
     @field_validator('pending_action_notification_channel')
@@ -199,6 +200,7 @@ async def get_preferences(
         "nudge_last_batch_at": prefs.get('nudge_last_batch_at'),
         "pending_action_notification_channel": prefs.get('pending_action_notification_channel', 'none'),
         "nudge_quiet_skip_weekend": bool(prefs.get('nudge_quiet_skip_weekend', False)),
+        "nudge_smart_dedup": bool(prefs.get('nudge_smart_dedup', True)),
     }
 
 
@@ -241,6 +243,9 @@ async def update_preferences(
 
     if prefs_update.nudge_quiet_skip_weekend is not None:
         update_kwargs['nudge_quiet_skip_weekend'] = int(prefs_update.nudge_quiet_skip_weekend)
+
+    if prefs_update.nudge_smart_dedup is not None:
+        update_kwargs['nudge_smart_dedup'] = int(prefs_update.nudge_smart_dedup)
 
     if prefs_update.pending_action_notification_channel is not None:
         valid = {'telegram', 'slack', 'none'}

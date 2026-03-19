@@ -42,6 +42,9 @@ from web.core.database import (
     create_email_feedback_token,
     get_next_drip_nudge,
     get_priority_items,
+    get_sender_for_detected_action,
+    is_sender_nudge_suppressed,
+    add_nudge_suppressed_sender,
 )
 
 logger = logging.getLogger(__name__)
@@ -1289,6 +1292,23 @@ class NudgeService:
         except Exception as e:
             logger.warning("Pattern suppression check error: %s", repr(e))
 
+        # Check sender-level nudge suppression
+        try:
+            sender_info = get_sender_for_detected_action(action_id)
+            if sender_info:
+                src_type, sender_id = sender_info
+                if is_sender_nudge_suppressed(self.user_id, src_type, sender_id):
+                    logger.info(
+                        "Nudge suppressed: sender %s/%s is nudge-suppressed for user %d",
+                        src_type, sender_id, self.user_id,
+                    )
+                    stats.setdefault("skipped_sender_suppressed", 0)
+                    stats["skipped_sender_suppressed"] += 1
+                    return 'skipped_sender_suppressed'
+        except Exception as e:
+            logger.warning("Sender nudge suppression check error: %s", repr(e))
+            # Fail open — proceed with nudge creation
+
         # Skip if the event deadline has already passed (e.g. calendar appointments)
         deadline = action.get('deadline')
         if deadline:
@@ -1644,6 +1664,9 @@ class NudgeService:
 
         JOINs detected_actions to recover person_name and action_text,
         which are needed for per-person deduplication in format_batch_digest().
+
+        Excludes nudges whose source has recent 'already_handled' or 'dismissed'
+        feedback (within 24h) so batch digests don't re-surface actioned items.
         """
         try:
             with get_db() as conn:
@@ -1659,9 +1682,46 @@ class NudgeService:
                       AND n.status = 'pending'
                       AND n.urgency = 'normal'
                       AND n.batch_id IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM user_feedback uf
+                          JOIN nudges n2 ON n2.id = uf.item_id
+                          WHERE uf.user_id = n.user_id
+                            AND uf.item_type = 'nudge'
+                            AND uf.feedback_type IN ('already_handled', 'dismissed')
+                            AND n.source_type IS NOT NULL
+                            AND n2.source_type = n.source_type
+                            AND n2.source_id = n.source_id
+                            AND uf.created_at > NOW() - INTERVAL '24 hours'
+                      )
                     ORDER BY n.created_at ASC
                 """, (self.user_id,))
-                return [dict(row) for row in cursor.fetchall()]
+                nudges = [dict(row) for row in cursor.fetchall()]
+
+            # Python-side filter: exclude nudges from nudge-suppressed senders.
+            # We resolve each detected_action nudge's sender and drop it if
+            # that sender is on the suppression list.
+            try:
+                filtered = []
+                for nudge in nudges:
+                    if nudge.get('source_type') == 'detected_action' and nudge.get('source_id'):
+                        sender_info = get_sender_for_detected_action(nudge['source_id'])
+                        if sender_info:
+                            src_type, sender_ident = sender_info
+                            if is_sender_nudge_suppressed(self.user_id, src_type, sender_ident):
+                                logger.debug(
+                                    "Filtering suppressed-sender nudge %d (%s/%s) from batch",
+                                    nudge['id'], src_type, sender_ident,
+                                )
+                                continue
+                    filtered.append(nudge)
+                return filtered
+            except Exception as e:
+                logger.warning(
+                    "Sender suppression filter in _get_pending_normal_nudges failed: %s",
+                    repr(e),
+                )
+                return nudges  # Fail open — return unfiltered list
+
         except Exception as e:
             logger.error("Failed to get pending normal nudges: %s", repr(e))
             return []
@@ -1759,8 +1819,390 @@ class NudgeService:
                 self.user_id, nudge_id
             )
 
+        # Propagate dismissal to related pending nudges from the same sender.
+        # When a user marks a nudge "already_handled" or "dismissed", suppress
+        # other pending detected_action nudges from the same person (by name
+        # or sender email) to avoid whack-a-mole on multi-email topics.
+        if response_type in ('already_handled', 'dismissed'):
+            try:
+                self._propagate_feedback_to_related_nudges(nudge_id)
+            except Exception as e:
+                logger.warning(
+                    "Feedback propagation failed for nudge %d: %s", nudge_id, repr(e)
+                )
+
+            # Check if repeated dismissals should escalate to sender-level suppression
+            try:
+                with get_db() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        SELECT source_type, source_id FROM nudges
+                        WHERE id = %s AND user_id = %s
+                    """, (nudge_id, self.user_id))
+                    src_row = cursor.fetchone()
+                if src_row:
+                    src_row = dict(src_row) if hasattr(src_row, 'keys') else {
+                        'source_type': src_row[0], 'source_id': src_row[1]
+                    }
+                    n_source_type = src_row.get('source_type')
+                    n_source_id = src_row.get('source_id')
+                    if n_source_type and n_source_id:
+                        self._check_sender_escalation(nudge_id, n_source_type, n_source_id)
+            except Exception as e:
+                logger.warning(
+                    "Sender escalation check failed for nudge %d: %s", nudge_id, repr(e)
+                )
+
         result["success"] = True
         return result
+
+    def _check_sender_escalation(
+        self,
+        nudge_id: int,
+        source_type: str,
+        source_id: int,
+    ) -> None:
+        """
+        Auto-escalate repeated dismissals to sender-level nudge suppression.
+
+        When a user dismisses (or marks 'already_handled') >= 3 nudges from the
+        same sender within the last 30 days, the sender is added to the
+        nudge_suppressed_senders table.  Any remaining pending nudges from that
+        sender are also marked as 'suppressed'.
+
+        Only applies to detected_action nudges — other types have no sender.
+        Fails open: errors are logged but never prevent the response from being
+        recorded.
+        """
+        if source_type != 'detected_action':
+            return
+
+        sender_info = get_sender_for_detected_action(source_id)
+        if not sender_info:
+            return
+
+        src_type, sender_ident = sender_info
+
+        # Already suppressed — nothing to do
+        if is_sender_nudge_suppressed(self.user_id, src_type, sender_ident):
+            return
+
+        # Count dismissed nudges from this sender in the last 30 days.
+        # Strategy: fetch all dismissed/already_handled detected_action nudges
+        # in the window, resolve each sender, and count matches.
+        try:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT n.source_id
+                    FROM nudges n
+                    WHERE n.user_id = %s
+                      AND n.source_type = 'detected_action'
+                      AND n.user_response IN ('dismissed', 'already_handled', 'auto_dismissed')
+                      AND n.created_at > NOW() - INTERVAL '30 days'
+                """, (self.user_id,))
+                dismissed_rows = cursor.fetchall()
+        except Exception as e:
+            logger.warning("Sender escalation query failed: %s", repr(e))
+            return
+
+        match_count = 0
+        for row in dismissed_rows:
+            da_id = row['source_id'] if isinstance(row, dict) else row[0]
+            if da_id is None:
+                continue
+            try:
+                other_sender = get_sender_for_detected_action(da_id)
+                if other_sender and other_sender == (src_type, sender_ident):
+                    match_count += 1
+            except Exception:
+                continue
+
+        if match_count < 3:
+            return
+
+        # Escalate: add sender to suppression list
+        reason = f"{match_count} dismissed nudges in last 30 days"
+        added = add_nudge_suppressed_sender(
+            self.user_id, src_type, sender_ident, reason=reason
+        )
+        if added:
+            logger.info(
+                "Sender escalated to nudge suppression for user %d: %s/%s (%s)",
+                self.user_id, src_type, sender_ident, reason,
+            )
+
+        # Mark remaining pending nudges from this sender as 'suppressed'
+        try:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                # Fetch pending detected_action nudges
+                cursor.execute("""
+                    SELECT n.id, n.source_id
+                    FROM nudges n
+                    WHERE n.user_id = %s
+                      AND n.source_type = 'detected_action'
+                      AND n.status = 'pending'
+                      AND n.batch_id IS NULL
+                """, (self.user_id,))
+                pending_rows = cursor.fetchall()
+
+            suppressed_ids = []
+            for row in pending_rows:
+                row = dict(row) if hasattr(row, 'keys') else {'id': row[0], 'source_id': row[1]}
+                da_id = row.get('source_id')
+                if da_id is None:
+                    continue
+                try:
+                    other_sender = get_sender_for_detected_action(da_id)
+                    if other_sender and other_sender == (src_type, sender_ident):
+                        suppressed_ids.append(row['id'])
+                except Exception:
+                    continue
+
+            if suppressed_ids:
+                with get_db() as conn:
+                    cursor = conn.cursor()
+                    # Update in a single statement using ANY
+                    cursor.execute("""
+                        UPDATE nudges
+                        SET status = 'suppressed', user_response = 'sender_suppressed'
+                        WHERE id = ANY(%s) AND user_id = %s
+                    """, (suppressed_ids, self.user_id))
+                    logger.info(
+                        "Suppressed %d pending nudges from escalated sender %s/%s for user %d",
+                        len(suppressed_ids), src_type, sender_ident, self.user_id,
+                    )
+        except Exception as e:
+            logger.warning(
+                "Failed to suppress pending nudges after sender escalation: %s", repr(e)
+            )
+
+    def _propagate_feedback_to_related_nudges(self, nudge_id: int) -> int:
+        """
+        Auto-dismiss other pending nudges related to the given nudge.
+
+        Two-pass approach:
+        1. **Name/email match:** Dismiss pending nudges with the same person_name
+           (case-insensitive) or same sender email from scanned_items.source_metadata.
+        2. **Haiku smart dedup (if enabled):** For remaining pending nudges not caught
+           by pass 1, use Haiku to compare action_text and dismiss topic-level duplicates.
+
+        Only affects pending detected_action nudges that haven't been batched yet.
+        Scoped to same source_type to avoid cross-type suppression.
+
+        Returns total count of nudges dismissed across both passes.
+        """
+        total_dismissed = 0
+
+        try:
+            with get_db() as conn:
+                cursor = conn.cursor()
+
+                # Get the dismissed nudge's details
+                cursor.execute("""
+                    SELECT n.source_type, n.source_id,
+                           da.person_name, da.action_text, da.scanned_item_id
+                    FROM nudges n
+                    LEFT JOIN detected_actions da
+                        ON n.source_type = 'detected_action' AND n.source_id = da.id
+                    WHERE n.id = %s AND n.user_id = %s
+                """, (nudge_id, self.user_id))
+                row = cursor.fetchone()
+                if not row:
+                    return 0
+
+                row = dict(row)
+                source_type = row.get('source_type')
+                person_name = row.get('person_name')
+                action_text = row.get('action_text')
+                scanned_item_id = row.get('scanned_item_id')
+
+                # Only propagate for detected_action nudges
+                if source_type != 'detected_action':
+                    return 0
+
+                # Extract sender email from the scanned item's metadata
+                sender_email = None
+                if scanned_item_id:
+                    cursor.execute("""
+                        SELECT source_metadata FROM scanned_items
+                        WHERE id = %s AND user_id = %s
+                    """, (scanned_item_id, self.user_id))
+                    si_row = cursor.fetchone()
+                    if si_row:
+                        import json as _json
+                        try:
+                            meta = _json.loads(
+                                si_row['source_metadata'] if isinstance(si_row, dict)
+                                else si_row[0]
+                            ) if (si_row['source_metadata'] if isinstance(si_row, dict) else si_row[0]) else {}
+                            sender_email = meta.get('from', '').strip().lower() or None
+                        except (ValueError, TypeError, KeyError):
+                            pass
+
+                # --- Pass 1: Name/email match ---
+                if person_name or sender_email:
+                    conditions = []
+                    params = [self.user_id, nudge_id]
+
+                    if person_name:
+                        conditions.append("LOWER(da2.person_name) = LOWER(%s)")
+                        params.append(person_name)
+
+                    if sender_email:
+                        conditions.append(
+                            "LOWER(si2.source_metadata::text) LIKE %s"
+                        )
+                        params.append(f'%"from": "{sender_email}"%')
+
+                    if conditions:
+                        match_clause = " OR ".join(conditions)
+
+                        cursor.execute(f"""
+                            UPDATE nudges n_target
+                            SET status = 'dismissed',
+                                user_response = 'auto_dismissed'
+                            FROM detected_actions da2
+                            JOIN scanned_items si2 ON da2.scanned_item_id = si2.id
+                            WHERE n_target.user_id = %s
+                              AND n_target.id != %s
+                              AND n_target.source_type = 'detected_action'
+                              AND n_target.source_id = da2.id
+                              AND n_target.status = 'pending'
+                              AND n_target.batch_id IS NULL
+                              AND ({match_clause})
+                        """, params)
+
+                        pass1_dismissed = cursor.rowcount
+                        total_dismissed += pass1_dismissed
+                        if pass1_dismissed > 0:
+                            logger.info(
+                                "Feedback propagation pass 1 (name/email) from nudge %d: "
+                                "auto-dismissed %d nudges (person=%s, email=%s)",
+                                nudge_id, pass1_dismissed, person_name, sender_email
+                            )
+
+                # --- Pass 2: Haiku smart dedup ---
+                prefs = get_nudge_preferences(self.user_id)
+                smart_dedup = prefs.get('nudge_smart_dedup', True)
+
+                if smart_dedup and action_text:
+                    try:
+                        pass2 = self._haiku_smart_dedup(nudge_id, action_text)
+                        total_dismissed += pass2
+                    except Exception as e:
+                        logger.warning(
+                            "Haiku smart dedup failed for nudge %d: %s", nudge_id, repr(e)
+                        )
+
+                return total_dismissed
+
+        except Exception as e:
+            logger.error("_propagate_feedback_to_related_nudges failed: %s", repr(e))
+            return 0
+
+    def _haiku_smart_dedup(self, dismissed_nudge_id: int, dismissed_action_text: str) -> int:
+        """
+        Use Haiku to identify remaining pending nudges that are about the same topic
+        as the dismissed nudge, even if name/email don't match.
+
+        Sends a single Haiku call with the dismissed action and all remaining pending
+        action texts. Haiku returns which ones are duplicates.
+
+        Returns count of nudges dismissed.
+        """
+        import json as _json
+
+        try:
+            with get_db() as conn:
+                cursor = conn.cursor()
+
+                # Get remaining pending detected_action nudges not yet dismissed
+                cursor.execute("""
+                    SELECT n.id, da.action_text
+                    FROM nudges n
+                    JOIN detected_actions da ON n.source_id = da.id
+                    WHERE n.user_id = %s
+                      AND n.id != %s
+                      AND n.source_type = 'detected_action'
+                      AND n.status = 'pending'
+                      AND n.batch_id IS NULL
+                      AND da.action_text IS NOT NULL
+                """, (self.user_id, dismissed_nudge_id))
+                candidates = [dict(r) for r in cursor.fetchall()]
+
+                if not candidates:
+                    return 0
+
+                # Build the comparison prompt
+                candidate_lines = []
+                for i, c in enumerate(candidates[:15]):  # Cap at 15 to keep prompt small
+                    candidate_lines.append(f'{i}: {c["action_text"][:200]}')
+
+                candidates_block = "\n".join(candidate_lines)
+
+                prompt = (
+                    "The user just dismissed this action item:\n"
+                    f'"{dismissed_action_text[:300]}"\n\n'
+                    "Below are other pending action items. Which ones are about the SAME underlying "
+                    "topic or request? Only include items that are clearly duplicates or follow-ups "
+                    "to the same issue — not merely from the same person about a different topic.\n\n"
+                    f"{candidates_block}\n\n"
+                    'Return a JSON array of the index numbers that are duplicates. '
+                    'If none are duplicates, return []. '
+                    'Return ONLY the JSON array, no explanation.'
+                )
+
+                from anthropic import Anthropic
+                client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+                response = client.messages.create(
+                    model='claude-haiku-4-5-20251001',
+                    max_tokens=100,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                raw = response.content[0].text.strip()
+
+                # Parse response
+                raw = raw.strip().strip('`').strip()
+                if raw.startswith('json'):
+                    raw = raw[4:].strip()
+                duplicate_indices = _json.loads(raw)
+
+                if not isinstance(duplicate_indices, list) or not duplicate_indices:
+                    return 0
+
+                # Dismiss the matching nudges
+                nudge_ids_to_dismiss = []
+                for idx in duplicate_indices:
+                    if isinstance(idx, int) and 0 <= idx < len(candidates):
+                        nudge_ids_to_dismiss.append(candidates[idx]['id'])
+
+                if not nudge_ids_to_dismiss:
+                    return 0
+
+                placeholders = ','.join(['%s'] * len(nudge_ids_to_dismiss))
+                cursor.execute(f"""
+                    UPDATE nudges
+                    SET status = 'dismissed',
+                        user_response = 'auto_dismissed_smart'
+                    WHERE id IN ({placeholders})
+                      AND user_id = %s
+                      AND status = 'pending'
+                """, nudge_ids_to_dismiss + [self.user_id])
+
+                dismissed = cursor.rowcount
+                if dismissed > 0:
+                    logger.info(
+                        "Feedback propagation pass 2 (Haiku smart dedup) from nudge %d: "
+                        "auto-dismissed %d topic-duplicate nudges",
+                        dismissed_nudge_id, dismissed
+                    )
+                return dismissed
+
+        except Exception as e:
+            logger.warning("_haiku_smart_dedup failed: %s", repr(e))
+            return 0
 
     # =========================================================================
     # Drip Queue Methods - : Conversational Nudge Flow

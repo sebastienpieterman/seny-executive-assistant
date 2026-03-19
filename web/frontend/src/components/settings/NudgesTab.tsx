@@ -85,6 +85,7 @@ interface NudgePrefs {
   nudge_batch_channel: string;
   pending_action_notification_channel: string;
   nudge_quiet_skip_weekend: boolean;
+  nudge_smart_dedup: boolean;
 }
 
 interface LearnedPatterns {
@@ -144,6 +145,7 @@ export function NudgesTab() {
     nudge_batch_channel: "push",
     pending_action_notification_channel: "none",
     nudge_quiet_skip_weekend: false,
+    nudge_smart_dedup: true,
   });
   const [patterns, setPatterns] = useState<LearnedPatterns>({
     responsive_hours: [],
@@ -213,6 +215,7 @@ export function NudgesTab() {
         nudge_batch_channel: updated.nudge_batch_channel,
         pending_action_notification_channel: updated.pending_action_notification_channel,
         nudge_quiet_skip_weekend: updated.nudge_quiet_skip_weekend,
+        nudge_smart_dedup: updated.nudge_smart_dedup,
       });
       toast.success("Nudge settings saved");
     } catch {
@@ -414,6 +417,21 @@ export function NudgesTab() {
                 checked={prefs.nudge_quiet_skip_weekend}
                 onCheckedChange={(checked) =>
                   savePrefs({ nudge_quiet_skip_weekend: checked })
+                }
+              />
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <Label>Smart deduplication</Label>
+                <p className="text-sm text-muted-foreground">
+                  Use AI to auto-dismiss duplicate nudges about the same topic when you give feedback
+                </p>
+              </div>
+              <Switch
+                checked={prefs.nudge_smart_dedup}
+                onCheckedChange={(checked) =>
+                  savePrefs({ nudge_smart_dedup: checked })
                 }
               />
             </div>
