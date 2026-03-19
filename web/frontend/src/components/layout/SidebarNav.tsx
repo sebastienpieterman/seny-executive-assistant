@@ -1,38 +1,25 @@
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import {
-  Home,
-  Mail,
-  Calendar,
-  CheckSquare,
-  FileText,
-  Brain,
-  Newspaper,
-  Inbox,
-  Settings,
-  Layers,
-  Activity,
-} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TOKEN_KEY } from "@/lib/api";
 
 interface NavItem {
-  icon: React.ElementType;
+  emoji: string;
   label: string;
   path: string;
 }
 
 const navItems: NavItem[] = [
-  { icon: Home, label: "Home", path: "/" },
-  { icon: Mail, label: "Mail", path: "/mail" },
-  { icon: Calendar, label: "Calendar", path: "/calendar" },
-  { icon: CheckSquare, label: "Tasks", path: "/tasks" },
-  { icon: FileText, label: "Notes", path: "/notes" },
-  { icon: Brain, label: "Brain", path: "/second-brain" },
-  { icon: Layers, label: "Living Context", path: "/lcd" },
-  { icon: Newspaper, label: "Digest", path: "/digest" },
-  { icon: Inbox, label: "Actions", path: "/actions" },
-  { icon: Activity, label: "Health", path: "/monitoring" },
+  { emoji: "🏠", label: "Home", path: "/" },
+  { emoji: "📧", label: "Mail", path: "/mail" },
+  { emoji: "📅", label: "Calendar", path: "/calendar" },
+  { emoji: "✅", label: "Tasks", path: "/tasks" },
+  { emoji: "📝", label: "Notes", path: "/notes" },
+  { emoji: "🧠", label: "Brain", path: "/second-brain" },
+  { emoji: "📊", label: "Living\nContext", path: "/lcd" },
+  { emoji: "📋", label: "Digest", path: "/digest" },
+  { emoji: "⚡", label: "Actions", path: "/actions" },
+  { emoji: "💓", label: "Health", path: "/monitoring" },
 ];
 
 interface SidebarNavProps {
@@ -93,17 +80,17 @@ export function SidebarNav({ onOpenSettings }: SidebarNavProps) {
                   ? "bg-sidebar-accent text-primary"
                   : "hover:bg-sidebar-accent/50 hover:text-foreground"
               )}
-              aria-label={item.label}
+              aria-label={item.label.replace("\n", " ")}
             >
               <div className="relative">
-                <item.icon className="h-5 w-5" />
+                <span className="text-xl leading-none">{item.emoji}</span>
                 {item.path === "/actions" && pendingCount > 0 && (
                   <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-destructive text-[10px] text-white font-bold">
                     {pendingCount > 9 ? "9+" : pendingCount}
                   </span>
                 )}
               </div>
-              <span className="text-[10px] font-medium leading-tight">
+              <span className="text-[10px] font-medium leading-tight whitespace-pre-line text-center">
                 {item.label}
               </span>
             </button>
@@ -118,7 +105,7 @@ export function SidebarNav({ onOpenSettings }: SidebarNavProps) {
           className="flex w-14 min-h-[44px] flex-col items-center gap-0.5 rounded-lg py-2 text-muted-foreground transition-colors hover:bg-sidebar-accent/50 hover:text-foreground"
           aria-label="Settings"
         >
-          <Settings className="h-5 w-5" />
+          <span className="text-xl leading-none">⚙️</span>
           <span className="text-[10px] font-medium leading-tight">
             Settings
           </span>

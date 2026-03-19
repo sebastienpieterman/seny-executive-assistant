@@ -1,20 +1,5 @@
 import { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import {
-  Home,
-  Mail,
-  Calendar,
-  CheckSquare,
-  FileText,
-  Brain,
-  Layers,
-  MoreHorizontal,
-  Settings,
-  MessageSquare,
-  Send,
-  Newspaper,
-  Activity,
-} from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   Sheet,
@@ -25,19 +10,19 @@ import {
 
 /** Primary tabs shown in the bottom bar */
 const primaryItems = [
-  { icon: Home, label: "Home", path: "/" },
-  { icon: Calendar, label: "Calendar", path: "/calendar" },
-  { icon: CheckSquare, label: "Tasks", path: "/tasks" },
-  { icon: FileText, label: "Notes", path: "/notes" },
+  { emoji: "🏠", label: "Home", path: "/" },
+  { emoji: "📅", label: "Calendar", path: "/calendar" },
+  { emoji: "✅", label: "Tasks", path: "/tasks" },
+  { emoji: "📝", label: "Notes", path: "/notes" },
 ] as const;
 
 /** Items in the "More" sheet */
 const moreItems = [
-  { icon: Mail, label: "Mail", path: "/mail" },
-  { icon: Brain, label: "Brain", path: "/second-brain" },
-  { icon: Layers, label: "Living Context", path: "/lcd" },
-  { icon: Newspaper, label: "Digest", path: "/digest" },
-  { icon: Activity, label: "Health", path: "/monitoring" },
+  { emoji: "📧", label: "Mail", path: "/mail" },
+  { emoji: "🧠", label: "Brain", path: "/second-brain" },
+  { emoji: "📊", label: "Living Context", path: "/lcd" },
+  { emoji: "📋", label: "Digest", path: "/digest" },
+  { emoji: "💓", label: "Health", path: "/monitoring" },
 ] as const;
 
 interface MobileNavProps {
@@ -81,7 +66,7 @@ export function MobileNav({
               )}
               aria-label={item.label}
             >
-              <item.icon className="h-5 w-5" />
+              <span className="text-xl leading-none">{item.emoji}</span>
               <span className="text-[10px] font-medium leading-tight">
                 {item.label}
               </span>
@@ -100,7 +85,7 @@ export function MobileNav({
           )}
           aria-label="More"
         >
-          <MoreHorizontal className="h-5 w-5" />
+          <span className="text-xl leading-none">•••</span>
           <span className="text-[10px] font-medium leading-tight">More</span>
         </button>
       </nav>
@@ -129,7 +114,7 @@ export function MobileNav({
                       : "text-muted-foreground hover:bg-sidebar-accent/50 hover:text-foreground"
                   )}
                 >
-                  <item.icon className="h-5 w-5" />
+                  <span className="text-xl leading-none">{item.emoji}</span>
                   {item.label}
                 </button>
               );
@@ -146,7 +131,7 @@ export function MobileNav({
               }}
               className="flex min-h-[44px] items-center gap-3 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent/50 hover:text-foreground"
             >
-              <MessageSquare className="h-5 w-5" />
+              <span className="text-xl leading-none">💼</span>
               Slack
             </button>
             <button
@@ -156,7 +141,7 @@ export function MobileNav({
               }}
               className="flex min-h-[44px] items-center gap-3 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent/50 hover:text-foreground"
             >
-              <Send className="h-5 w-5" />
+              <span className="text-xl leading-none">✈️</span>
               Telegram
             </button>
 
@@ -171,7 +156,7 @@ export function MobileNav({
               }}
               className="flex min-h-[44px] items-center gap-3 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent/50 hover:text-foreground"
             >
-              <Settings className="h-5 w-5" />
+              <span className="text-xl leading-none">⚙️</span>
               Settings
             </button>
           </div>
