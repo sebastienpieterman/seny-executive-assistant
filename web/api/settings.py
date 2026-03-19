@@ -9,6 +9,8 @@ from typing import Optional, List
 from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel
 import httpx
+import json
+import logging
 import os
 import re
 
@@ -21,8 +23,11 @@ from web.core.database import (
     get_scanner_preferences,
     update_scanner_preferences as db_update_scanner_preferences,
     get_user_profile,
+    set_lcd_layer1,
 )
 from web.auth.jwt_utils import require_auth
+
+logger = logging.getLogger(__name__)
 
 
 # Create settings router
@@ -1310,6 +1315,56 @@ async def complete_setup(user_id: str = Depends(require_auth)):
             "UPDATE user_settings SET setup_complete = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = %s",
             (int(user_id),)
         )
+
+    # Populate LCD Layer 1 from wizard data (non-blocking — fail open)
+    try:
+        user_name = profile.get('user_name', 'User')
+        layer1_parts = []
+
+        # Parse questionnaire from user_context
+        ctx_raw = profile.get('user_context', '')
+        try:
+            ctx = json.loads(ctx_raw)
+            if isinstance(ctx, dict):
+                if ctx.get('work_role'):
+                    layer1_parts.append(ctx['work_role'])
+                if ctx.get('personal_health'):
+                    layer1_parts.append(ctx['personal_health'])
+                if ctx.get('goals_working'):
+                    layer1_parts.append(f"Working toward: {ctx['goals_working']}")
+                if ctx.get('goals_motivation'):
+                    layer1_parts.append(f"Motivation style: {ctx['goals_motivation']}")
+                if ctx.get('operate_best'):
+                    layer1_parts.append(f"Best hours: {ctx['operate_best']}")
+                if ctx.get('operate_derail'):
+                    layer1_parts.append(f"Derailed by: {ctx['operate_derail']}")
+            elif ctx_raw.strip():
+                layer1_parts.append(ctx_raw.strip())
+        except (json.JSONDecodeError, TypeError):
+            if ctx_raw.strip():
+                layer1_parts.append(ctx_raw.strip())
+
+        # Add key people summary
+        people_raw = profile.get('key_people', '[]')
+        try:
+            people = json.loads(people_raw) if people_raw else []
+            for p in people:
+                if isinstance(p, dict) and p.get('name'):
+                    rel = p.get('relationship', '')
+                    ctx_p = p.get('context', '')
+                    entry = f"{p['name']} ({rel})"
+                    if ctx_p:
+                        entry += f" — {ctx_p}"
+                    layer1_parts.append(entry)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Write to LCD Layer 1
+        if layer1_parts:
+            layer1_text = f"Who {user_name} is:\n" + "\n".join(layer1_parts)
+            set_lcd_layer1(int(user_id), layer1_text)
+    except Exception as e:
+        logger.warning("LCD Layer 1 population failed (non-blocking): %s", repr(e))
 
     return {
         "success": True,

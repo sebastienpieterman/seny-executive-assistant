@@ -8393,7 +8393,32 @@ When asked about dates or scheduling events/tasks, use this reference — do NOT
         # knows who it's talking to even when tool results are empty (fresh install)
         _profile_lines = []
         if profile.get('user_context'):
-            _profile_lines.append(profile['user_context'])
+            try:
+                _ctx = json.loads(profile['user_context'])
+                if isinstance(_ctx, dict):
+                    _ctx_labels = {
+                        'work_role': 'Work',
+                        'work_day': 'Typical day',
+                        'work_tools': 'Tools',
+                        'personal_hobbies': 'Interests',
+                        'personal_health': 'Health/daily life',
+                        'personal_life': 'Personal context',
+                        'goals_working': 'Working toward',
+                        'goals_motivation': 'What motivates them',
+                        'goals_procrastinating': 'Avoiding',
+                        'operate_best': 'Peak hours',
+                        'operate_derail': 'Focus killers',
+                        'operate_hard': 'What is hard',
+                    }
+                    for _ctx_key, _ctx_label in _ctx_labels.items():
+                        _ctx_val = _ctx.get(_ctx_key, '').strip()
+                        if _ctx_val:
+                            _profile_lines.append(f"{_ctx_label}: {_ctx_val}")
+                else:
+                    _profile_lines.append(str(_ctx))
+            except (json.JSONDecodeError, TypeError):
+                # Legacy plain-text user_context
+                _profile_lines.append(profile['user_context'])
         try:
             _profile_people = json.loads(profile.get('key_people') or '[]')
         except (json.JSONDecodeError, TypeError):
@@ -9305,7 +9330,27 @@ You are a thinking partner. Not a task executor. Not a yes-machine. The most imp
 What matters most: {profile['priorities']}
 """
                 if profile.get('user_context'):
-                    system_prompt += f"""
+                    try:
+                        _pb_ctx = json.loads(profile['user_context'])
+                        if isinstance(_pb_ctx, dict):
+                            _pb_ctx_parts = []
+                            for _pbk, _pbl in [('work_role', 'Work'), ('personal_health', 'Health/daily life'),
+                                                ('goals_working', 'Working toward'), ('goals_motivation', 'What motivates them'),
+                                                ('operate_best', 'Peak hours'), ('operate_derail', 'Focus killers')]:
+                                _pbv = _pb_ctx.get(_pbk, '').strip()
+                                if _pbv:
+                                    _pb_ctx_parts.append(f"{_pbl}: {_pbv}")
+                            if _pb_ctx_parts:
+                                _pb_ctx_summary = "; ".join(_pb_ctx_parts)
+                                system_prompt += f"""
+About {user_name}: {_pb_ctx_summary}
+"""
+                        else:
+                            system_prompt += f"""
+About {user_name}: {profile['user_context']}
+"""
+                    except (json.JSONDecodeError, TypeError):
+                        system_prompt += f"""
 About {user_name}: {profile['user_context']}
 """
 
