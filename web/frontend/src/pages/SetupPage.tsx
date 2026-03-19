@@ -881,9 +881,17 @@ export function SetupPage() {
                 <div className="flex-1">
                   <Label className="text-sm font-medium">Enable Screen Agent</Label>
                   <p className="text-sm text-muted-foreground mt-1">
-                    A desktop companion that watches what you're working on and provides
-                    contextual nudges. Requires installing a small desktop app.
+                    Desktop companion that watches your screen and nudges you when you drift off-task.
+                    Requires installing a small app on your computer.
                   </p>
+                  <a
+                    href="https://github.com/highhands89/seny-executive-assistant/blob/main/screen_agent/SETUP.md"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-primary hover:underline mt-1 inline-block"
+                  >
+                    View setup guide →
+                  </a>
                 </div>
               </div>
 
@@ -896,9 +904,17 @@ export function SetupPage() {
                 <div className="flex-1">
                   <Label className="text-sm font-medium">Enable Browser History Sync</Label>
                   <p className="text-sm text-muted-foreground mt-1">
-                    Syncs your Chrome browsing history to give Seny context about what
-                    you're researching. Requires a small Python script.
+                    Gives Seny context about what you've been reading in Chrome.
+                    Requires running a small Python script on your computer.
                   </p>
+                  <a
+                    href="https://github.com/highhands89/seny-executive-assistant/blob/main/agent/README.md"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-primary hover:underline mt-1 inline-block"
+                  >
+                    View setup guide →
+                  </a>
                 </div>
               </div>
 
