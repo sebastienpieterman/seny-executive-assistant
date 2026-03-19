@@ -6840,7 +6840,8 @@ def get_user_profile(user_id: int) -> dict:
         cursor.execute("""
             SELECT user_name, user_pronouns_subject, user_pronouns_object,
                    user_pronouns_possessive, user_context, key_people,
-                   key_projects, priorities, setup_complete, personality_casual
+                   key_projects, priorities, setup_complete, personality_casual,
+                   updated_at
             FROM user_settings WHERE user_id = %s
         """, (user_id,))
         row = cursor.fetchone()

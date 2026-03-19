@@ -8434,12 +8434,25 @@ When asked about dates or scheduling events/tasks, use this reference — do NOT
             _profile_lines.append(f"What matters most: {profile['priorities']}")
 
         if _profile_lines:
+            # Add profile timestamp so the model can interpret relative dates
+            _profile_updated = profile.get('updated_at')
+            if _profile_updated:
+                try:
+                    from datetime import datetime
+                    if isinstance(_profile_updated, str):
+                        _dt = datetime.fromisoformat(_profile_updated.replace('Z', '+00:00'))
+                    else:
+                        _dt = _profile_updated
+                    _profile_lines.append(f"(Profile last updated: {_dt.strftime('%B %d, %Y')})")
+                except (ValueError, TypeError):
+                    pass
+
             _profile_block = "\n".join(_profile_lines)
             system_prompt += f"""
 **WHO YOU ARE TALKING TO — {user_name} ({p_subj}/{p_obj}/{p_poss}):**
 {_profile_block}
 
-This is what {user_name} told you during setup. You KNOW this. When asked "what do you know about me?", reference this information — don't say you know nothing just because tool queries return empty results.
+This is what {user_name} told you during setup. You KNOW this — don't say you know nothing just because tool queries return empty results. The "Profile last updated" date tells you when this information was written, which matters for any relative time references in the profile.
 
 """
 
