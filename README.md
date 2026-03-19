@@ -31,8 +31,7 @@ Self-hosted, private, and designed with the principle that your AI assistant sho
 
 > Seny started as a personal project, built over months for my own daily use, deeply integrated with my own email, calendar, relationships, and workflows. To make it available publicly, I stripped out every piece of personal data, replaced hardcoded context with a setup wizard, and tested the result from scratch. But a codebase that was built around one person's life for months is hard to fully sanitize and re-generalize in one pass. If you run into bugs, rough edges, or something that doesn't quite make sense, that's likely a remnant of that process. Please open an issue on GitHub and I'll fix it.
 
-<!-- Screenshot placeholder: Replace with your own screenshot showing the dashboard or chat -->
-<!-- ![Seny Dashboard](docs/images/screenshot-dashboard.png) -->
+![Seny Dashboard](docs/images/screenshot-dashboard.png)
 
 ---
 
