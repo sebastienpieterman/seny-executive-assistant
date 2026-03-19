@@ -1,31 +1,63 @@
-# Seny — Your Personal AI Assistant
+<div align="center">
+
+<img src="web/static/images/seny-logo.png" alt="Seny" width="120" />
+
+# Seny
+
+**Your self-hosted AI executive assistant. Private. Proactive. Yours.**
+
+[![License: PolyForm NC](https://img.shields.io/badge/license-PolyForm%20NC%201.0-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB.svg)](https://python.org)
+[![Powered by Claude](https://img.shields.io/badge/powered%20by-Claude%20(Anthropic)-D4A574.svg)](https://anthropic.com)
+[![Deploy on Railway](https://img.shields.io/badge/deploy-Railway-0B0D0E.svg)](https://railway.app)
+
+A personal AI assistant that connects to your email, calendar, Slack, and Telegram, then ties everything together so you never miss what matters. Built for people who want an AI that works *for* them without handing their data to a third party.
+
+[Get Started](#quick-start-railway--recommended) · [Features](#features) · [Integrations](#adding-integrations-optional) · [Troubleshooting](#troubleshooting)
+
+</div>
+
+---
+
+## Why Seny?
 
 The explosion of AI agents in 2025–2026 proved something important: giving an AI unrestricted access to your computer, your email, and your messaging apps — with no guardrails — is a disaster waiting to happen. Agents like OpenClaw shipped with shell access, browser control, and file system permissions out of the box. The result was predictable: deleted inboxes, leaked credentials, private conversations posted publicly, and over 40,000 exposed instances with zero authentication.
 
-Seny takes a different approach. It's a personal AI assistant powered by Claude that connects to your email, calendar, Slack, and Telegram — but it can't execute arbitrary commands on your machine, it can't browse the web as you, and it can't take destructive actions without your approval. When Seny wants to send an email, create a calendar event, or act on your behalf, it proposes the action and waits for you to approve or dismiss it. You stay in the loop on everything that matters, without being buried in confirmation dialogs for every small thing.
+**Seny takes a different approach.**
+
+It connects to your email, calendar, Slack, and Telegram — but it can't execute arbitrary commands on your machine, it can't browse the web as you, and it can't take destructive actions without your approval. When Seny wants to send an email, create a calendar event, or act on your behalf, it proposes the action and waits for you to approve or dismiss it. You stay in the loop on everything that matters, without being buried in confirmation dialogs for every small thing.
 
 Self-hosted, private, and designed with the principle that your AI assistant should work *for* you, not *as* you.
 
-Seny started as a personal project, built over months for my own daily use, deeply integrated with my own email, calendar, relationships, and workflows. To make it available publicly, I stripped out every piece of personal data, replaced hardcoded context with a setup wizard, and tested the result from scratch. But a codebase that was built around one person's life for months is hard to fully sanitize and re-generalize in one pass. If you run into bugs, rough edges, or something that doesn't quite make sense, that's likely a remnant of that process. Please open an issue on GitHub and I'll fix it.
+> Seny started as a personal project, built over months for my own daily use, deeply integrated with my own email, calendar, relationships, and workflows. To make it available publicly, I stripped out every piece of personal data, replaced hardcoded context with a setup wizard, and tested the result from scratch. But a codebase that was built around one person's life for months is hard to fully sanitize and re-generalize in one pass. If you run into bugs, rough edges, or something that doesn't quite make sense, that's likely a remnant of that process. Please open an issue on GitHub and I'll fix it.
 
-## What Seny Can Do
+<!-- Screenshot placeholder: Replace with your own screenshot showing the dashboard or chat -->
+<!-- ![Seny Dashboard](docs/images/screenshot-dashboard.png) -->
 
-- **Chat with Claude** — Have conversations with an AI that knows your context, your people, and your priorities
-- **Gmail integration** — Search, read, and send emails through the chat
-- **Google Calendar** — View, create, and manage events without leaving the conversation
-- **Microsoft Outlook** — Same email and calendar features for Microsoft accounts
-- **Notes** — A built-in note-taking system inspired by Obsidian, with [[wiki-links]], #tags, full-text search, and a graph view showing how your notes connect
-- **Tasks & errands** — Create to-do items, set reminders, track progress, mark complete
-- **Slack** — Search, read, and send messages across your Slack workspaces
-- **Telegram** — Search, read, and send messages in your Telegram chats
-- **People tracker** — Keep track of relationships, last contact dates, and follow-up reminders
-- **Projects & goals** — Track what you are working on and surface relevant info automatically
-- **Daily digest** — A morning briefing of what matters today (calendar, tasks, follow-ups)
-- **Proactive nudges** — Smart reminders based on your priorities and patterns
-- **Screen agent** — Optional desktop companion that periodically checks what's on your screen and nudges you if you've drifted off-task. Originally built as an ADHD accountability tool by the developer, it learns what counts as "productive" for you and backs off over time (separate install)
-- **Browser history sync** — Optional Chrome extension to give Seny context about what you have been reading
-- **Web search** — Claude can search the web and cite sources in your conversations
-- **Semantic search** — Optional deep search across all your conversations using AI embeddings
+---
+
+## Features
+
+| | Feature | Description |
+|---|---------|-------------|
+| 💬 | **AI Chat** | Conversations with Claude that know your context, your people, and your priorities |
+| 📧 | **Gmail** | Search, read, and send emails right from the chat |
+| 📅 | **Google Calendar** | View, create, and manage events without leaving the conversation |
+| 📨 | **Microsoft Outlook** | Full email and calendar support for Microsoft accounts |
+| 📝 | **Notes** | Obsidian-inspired note-taking with [[wiki-links]], #tags, full-text search, and graph view |
+| ✅ | **Tasks** | To-do items, reminders, progress tracking, recurring tasks |
+| 💼 | **Slack** | Search, read, and send messages across your workspaces |
+| ✈️ | **Telegram** | Search, read, and send messages in your Telegram chats |
+| 👥 | **People Tracker** | Relationships, last contact dates, follow-up reminders |
+| 🎯 | **Projects & Goals** | Track what you're working on; Seny surfaces relevant info automatically |
+| 📋 | **Daily Digest** | Morning briefing: calendar, tasks, follow-ups, what needs attention |
+| 🔔 | **Proactive Nudges** | Smart reminders based on your priorities and behavioral patterns |
+| 🖥️ | **Screen Agent** | Desktop companion that nudges you when you drift off-task — built as an ADHD accountability tool, learns what "productive" means for you (optional, separate install) |
+| 🌐 | **Web Search** | Claude searches the web and cites sources in your conversations |
+| 🔍 | **Semantic Search** | AI-powered deep search across all your conversations (optional) |
+| 📊 | **Browser History Sync** | Give Seny context about what you've been reading (optional) |
+
+---
 
 **A note on these instructions:** This guide is written for the widest possible audience, including people who have never deployed a web application before. If a step seems overly detailed, that's intentional — we'd rather over-explain than leave anyone stuck.
 
