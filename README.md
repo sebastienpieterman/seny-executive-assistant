@@ -499,6 +499,10 @@ Seny/
 └── start.sh                # Server startup script
 ```
 
+## Inspiration
+
+Seny was significantly inspired by the work of [Nate B. Jones](https://www.natebjones.com), an AI strategist and content creator who has been chronicling generative AI and teaching non-engineers how to build with it. His video ["Why 2026 Is the Year to Build a Second Brain"](https://www.youtube.com/@NateBJones) laid out the architectural principles — capture, classify, store, surface, correct — that became the foundation of how Seny thinks about proactive intelligence. His follow-up on portable architecture and community-driven building validated the idea that these patterns belong in a self-hosted product, not scattered across Zapier automations. If you're interested in the "why" behind systems like Seny, his [YouTube channel](https://www.youtube.com/@NateBJones) and [Substack](https://natebjones.substack.com) are worth your time.
+
 ## License
 
 Seny is licensed under the **PolyForm NonCommercial 1.0.0** license. This means you are free to use, modify, and self-host Seny for personal, non-commercial purposes. It cannot be used to provide commercial services or sold. See the [LICENSE](LICENSE) file for full details.
