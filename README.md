@@ -501,7 +501,8 @@ Seny/
 
 ## Inspiration
 
-Seny was significantly inspired by the work of [Nate B. Jones](https://www.natebjones.com), an AI strategist and content creator who has been chronicling generative AI and teaching non-engineers how to build with it. His video ["Why 2026 Is the Year to Build a Second Brain"](https://www.youtube.com/@NateBJones) laid out the architectural principles — capture, classify, store, surface, correct — that became the foundation of how Seny thinks about proactive intelligence. His follow-up on portable architecture and community-driven building validated the idea that these patterns belong in a self-hosted product, not scattered across Zapier automations. If you're interested in the "why" behind systems like Seny, his [YouTube channel](https://www.youtube.com/@NateBJones) and [Substack](https://natebjones.substack.com) are worth your time.
+> [!TIP]
+> **This project was heavily inspired by [Nate B. Jones](https://www.natebjones.com)**, an AI strategist and content creator who has been chronicling generative AI and teaching non-engineers how to build with it. His video ["Why 2026 Is the Year to Build a Second Brain"](https://www.youtube.com/@NateBJones) laid out the architectural principles — capture, classify, store, surface, correct — that became the foundation of how Seny thinks about proactive intelligence. His follow-up on portable architecture and community-driven building validated the idea that these patterns belong in a self-hosted product, not scattered across Zapier automations. If you're interested in the "why" behind systems like Seny, his [YouTube channel](https://www.youtube.com/@NateBJones) and [Substack](https://natebjones.substack.com) are worth your time.
 
 ## License
 
