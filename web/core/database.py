@@ -2829,6 +2829,22 @@ def init_db() -> None:
         print(f"[INIT_DB] Phase 60 Research Audit Runs: {timings['research_audit_runs']:.2f}s")
 
         # ============================================================================
+        # SECTION: Dismissed Duplicates (Phase 78)
+        # ============================================================================
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS dismissed_duplicates (
+                id BIGSERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                id_a INTEGER NOT NULL,
+                id_b INTEGER NOT NULL,
+                dismissed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, category, id_a, id_b),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        """)
+
+        # ============================================================================
         # SECTION: GIN Indexes (PostgreSQL only — replaces FTS5 virtual tables)
         # ============================================================================
         # GIN indexes for pg_trgm text search (replaces FTS5 virtual tables)
@@ -5928,6 +5944,175 @@ def delete_person(person_id: int) -> bool:
         return cursor.rowcount > 0
 
 
+def delete_embedding_tracking(entity_type: str, entity_id, user_id: int) -> bool:
+    """Delete an embedding_tracking record to force re-embedding on next scheduler run."""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM embedding_tracking WHERE entity_type = %s AND entity_id = %s AND user_id = %s",
+                (entity_type, str(entity_id), user_id)
+            )
+            return cursor.rowcount > 0
+    except Exception as e:
+        logger.error("delete_embedding_tracking error: %s", repr(e))
+        return False
+
+
+def merge_people(user_id: int, winner_id: int, loser_id: int) -> dict:
+    """
+    Merge two people records. Winner absorbs loser's data, references, and is kept.
+    Loser is deleted after all FK dependencies are transferred.
+
+    12-step transactional merge:
+    1. Validate both exist and belong to user
+    2. Merge text fields (context, notes, last_contact_date, relationship_type)
+    3-6. Transfer FK references (people_followups, activity_log, detected_actions, entity_mappings)
+    7. Transfer cross_references (handle UNIQUE conflicts)
+    8. Delete embedding_tracking for loser
+    9. Log merge to activity_log
+    10. Delete loser
+    11-12. Post-commit: ChromaDB cleanup
+
+    Returns dict with merge details or raises on error.
+    """
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+
+            # Step 1: Validate both records exist and belong to user
+            cursor.execute("SELECT * FROM people WHERE id = %s AND user_id = %s", (winner_id, user_id))
+            winner = cursor.fetchone()
+            if not winner:
+                return {"success": False, "error": f"Winner person {winner_id} not found"}
+            winner = dict(winner)
+
+            cursor.execute("SELECT * FROM people WHERE id = %s AND user_id = %s", (loser_id, user_id))
+            loser = cursor.fetchone()
+            if not loser:
+                return {"success": False, "error": f"Loser person {loser_id} not found"}
+            loser = dict(loser)
+
+            # Step 2: Merge text fields
+            merged_context = winner.get('context') or ''
+            loser_context = loser.get('context') or ''
+            if loser_context:
+                merged_context = f"{merged_context}\n---\n(Merged from: {loser['name']})\n{loser_context}" if merged_context else loser_context
+
+            merged_notes = winner.get('notes') or ''
+            loser_notes = loser.get('notes') or ''
+            if loser_notes:
+                merged_notes = f"{merged_notes}\n---\n(Merged from: {loser['name']})\n{loser_notes}" if merged_notes else loser_notes
+
+            # Keep most recent last_contact_date
+            winner_lcd = winner.get('last_contact_date') or ''
+            loser_lcd = loser.get('last_contact_date') or ''
+            merged_lcd = max(winner_lcd, loser_lcd) if winner_lcd and loser_lcd else (winner_lcd or loser_lcd)
+
+            # Keep winner's relationship_type unless NULL
+            merged_rt = winner.get('relationship_type') or loser.get('relationship_type')
+
+            cursor.execute("""
+                UPDATE people SET context = %s, notes = %s, last_contact_date = %s,
+                       relationship_type = %s, updated_at = NOW()
+                WHERE id = %s
+            """, (merged_context, merged_notes, merged_lcd or None, merged_rt, winner_id))
+
+            # Step 3: Transfer people_followups
+            cursor.execute(
+                "UPDATE people_followups SET person_id = %s WHERE person_id = %s",
+                (winner_id, loser_id)
+            )
+            followups_moved = cursor.rowcount
+
+            # Step 4: Transfer activity_log
+            cursor.execute(
+                "UPDATE activity_log SET person_id = %s WHERE person_id = %s",
+                (winner_id, loser_id)
+            )
+            activity_moved = cursor.rowcount
+
+            # Step 5: Transfer detected_actions
+            cursor.execute(
+                "UPDATE detected_actions SET person_id = %s WHERE person_id = %s",
+                (winner_id, loser_id)
+            )
+            actions_moved = cursor.rowcount
+
+            # Step 6: Transfer entity_mappings (handle UNIQUE conflicts)
+            # Delete conflicts first: same source+source_identifier mapped to both winner and loser
+            cursor.execute("""
+                DELETE FROM entity_mappings
+                WHERE person_id = %s
+                  AND (user_id, source, source_identifier) IN (
+                      SELECT user_id, source, source_identifier
+                      FROM entity_mappings WHERE person_id = %s
+                  )
+            """, (loser_id, winner_id))
+            # Update remaining
+            cursor.execute(
+                "UPDATE entity_mappings SET person_id = %s WHERE person_id = %s",
+                (winner_id, loser_id)
+            )
+            mappings_moved = cursor.rowcount
+
+            # Step 7: Transfer cross_references (handle UNIQUE conflicts)
+            cursor.execute("""
+                DELETE FROM cross_references
+                WHERE entity_type = 'person' AND entity_id = %s
+                  AND scanned_item_id IN (
+                      SELECT scanned_item_id FROM cross_references
+                      WHERE entity_type = 'person' AND entity_id = %s
+                  )
+            """, (loser_id, winner_id))
+            cursor.execute(
+                "UPDATE cross_references SET entity_id = %s WHERE entity_type = 'person' AND entity_id = %s",
+                (winner_id, loser_id)
+            )
+
+            # Step 8: Delete embedding_tracking for loser
+            cursor.execute(
+                "DELETE FROM embedding_tracking WHERE entity_type = 'people' AND entity_id = %s AND user_id = %s",
+                (str(loser_id), user_id)
+            )
+
+            # Step 9: Log merge to activity_log
+            cursor.execute("""
+                INSERT INTO activity_log (user_id, person_id, action_type, old_value, new_value, source, created_at)
+                VALUES (%s, %s, 'merge', %s, %s, 'system', NOW())
+            """, (user_id, winner_id, f"Merged: {loser['name']} (ID {loser_id})", f"Into: {winner['name']} (ID {winner_id})"))
+
+            # Step 10: Delete loser
+            cursor.execute("DELETE FROM people WHERE id = %s", (loser_id,))
+
+        # Steps 11-12: Post-commit ChromaDB cleanup (non-transactional, fail-open)
+        try:
+            from web.services.embedding_service import get_embedding_service
+            emb = get_embedding_service()
+            if emb.enabled:
+                emb.delete_embeddings("people", [f"person_{loser_id}"])
+                # Force re-embed winner with merged data
+                delete_embedding_tracking("people", str(winner_id), user_id)
+        except Exception as e:
+            logger.warning("merge_people: ChromaDB cleanup failed (non-blocking): %s", repr(e))
+
+        return {
+            "success": True,
+            "winner_id": winner_id,
+            "loser_id": loser_id,
+            "loser_name": loser['name'],
+            "winner_name": winner['name'],
+            "followups_moved": followups_moved,
+            "activity_moved": activity_moved,
+            "actions_moved": actions_moved,
+            "mappings_moved": mappings_moved,
+        }
+
+    except Exception as e:
+        logger.error("merge_people error: %s", repr(e))
+        return {"success": False, "error": str(e)}
+
+
 def search_people(user_id: int, query: str, limit: int = 20) -> list[dict]:
     """
     Search people using FTS5 full-text search.
@@ -6550,6 +6735,374 @@ def delete_idea(idea_id: int) -> bool:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM ideas WHERE id = %s", (idea_id,))
         return cursor.rowcount > 0
+
+
+def merge_ideas(user_id: int, winner_id: int, loser_id: int) -> dict:
+    """
+    Merge two idea records. Winner absorbs loser's data.
+
+    7-step transactional merge:
+    1. Validate both exist
+    2. Append loser's summary/notes to winner's notes with merge separator
+    3. Combine and deduplicate tags (case-insensitive)
+    4. Handle cross_references UNIQUE conflicts (entity_type='idea')
+    5. Delete embedding_tracking for loser
+    6. Delete loser
+    7. Post-commit: ChromaDB cleanup
+    """
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+
+            # Step 1: Validate
+            cursor.execute("SELECT * FROM ideas WHERE id = %s AND user_id = %s", (winner_id, user_id))
+            winner = cursor.fetchone()
+            if not winner:
+                return {"success": False, "error": f"Winner idea {winner_id} not found"}
+            winner = dict(winner)
+
+            cursor.execute("SELECT * FROM ideas WHERE id = %s AND user_id = %s", (loser_id, user_id))
+            loser = cursor.fetchone()
+            if not loser:
+                return {"success": False, "error": f"Loser idea {loser_id} not found"}
+            loser = dict(loser)
+
+            # Step 2: Merge text fields into winner's notes
+            merged_notes = winner.get('notes') or ''
+            loser_summary = loser.get('summary') or ''
+            loser_notes = loser.get('notes') or ''
+            merge_text = ''
+            if loser_summary:
+                merge_text += loser_summary
+            if loser_notes:
+                merge_text += ('\n' + loser_notes) if merge_text else loser_notes
+            if merge_text:
+                separator = f"\n---\n(Merged from: {loser['title']})\n"
+                merged_notes = f"{merged_notes}{separator}{merge_text}" if merged_notes else merge_text
+
+            # Step 3: Combine and deduplicate tags (case-insensitive)
+            winner_tags = [t.strip() for t in (winner.get('tags') or '').split(',') if t.strip()]
+            loser_tags = [t.strip() for t in (loser.get('tags') or '').split(',') if t.strip()]
+            seen_lower = set()
+            merged_tags = []
+            for tag in winner_tags + loser_tags:
+                if tag.lower() not in seen_lower:
+                    seen_lower.add(tag.lower())
+                    merged_tags.append(tag)
+            merged_tags_str = ', '.join(merged_tags) if merged_tags else None
+
+            cursor.execute("""
+                UPDATE ideas SET notes = %s, tags = %s, updated_at = NOW()
+                WHERE id = %s
+            """, (merged_notes, merged_tags_str, winner_id))
+
+            # Step 4: Handle cross_references UNIQUE conflicts
+            cursor.execute("""
+                DELETE FROM cross_references
+                WHERE entity_type = 'idea' AND entity_id = %s
+                  AND scanned_item_id IN (
+                      SELECT scanned_item_id FROM cross_references
+                      WHERE entity_type = 'idea' AND entity_id = %s
+                  )
+            """, (loser_id, winner_id))
+            cursor.execute(
+                "UPDATE cross_references SET entity_id = %s WHERE entity_type = 'idea' AND entity_id = %s",
+                (winner_id, loser_id)
+            )
+
+            # Step 5: Delete embedding_tracking for loser
+            cursor.execute(
+                "DELETE FROM embedding_tracking WHERE entity_type = 'ideas' AND entity_id = %s AND user_id = %s",
+                (str(loser_id), user_id)
+            )
+
+            # Step 6: Delete loser
+            cursor.execute("DELETE FROM ideas WHERE id = %s", (loser_id,))
+
+        # Step 7: Post-commit ChromaDB cleanup
+        try:
+            from web.services.embedding_service import get_embedding_service
+            emb = get_embedding_service()
+            if emb.enabled:
+                emb.delete_embeddings("ideas", [f"idea_{loser_id}"])
+                delete_embedding_tracking("ideas", str(winner_id), user_id)
+        except Exception as e:
+            logger.warning("merge_ideas: ChromaDB cleanup failed (non-blocking): %s", repr(e))
+
+        return {
+            "success": True,
+            "winner_id": winner_id,
+            "loser_id": loser_id,
+            "loser_title": loser['title'],
+            "winner_title": winner['title'],
+        }
+
+    except Exception as e:
+        logger.error("merge_ideas error: %s", repr(e))
+        return {"success": False, "error": str(e)}
+
+
+def find_duplicate_people(user_id: int) -> list:
+    """
+    Find potential duplicate people using name similarity.
+
+    Match types:
+    - exact (1.0): case-insensitive exact match
+    - contains (0.8): one name contains the other, both >= 3 chars
+    - first_name (0.6): first word matches, both multi-word, first word >= 3 chars
+
+    Uses union-find for transitive grouping. Filters out dismissed pairs.
+    Returns groups sorted by confidence DESC.
+    """
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, name FROM people WHERE user_id = %s AND name != 'Unknown'",
+                (user_id,)
+            )
+            people = [dict(r) for r in cursor.fetchall()]
+
+        if len(people) < 2:
+            return []
+
+        # Get dismissed pairs
+        dismissed = get_dismissed_pairs(user_id, 'people')
+
+        # Find matching pairs
+        pairs = []
+        for i in range(len(people)):
+            for j in range(i + 1, len(people)):
+                a, b = people[i], people[j]
+                pair_key = (min(a['id'], b['id']), max(a['id'], b['id']))
+                if pair_key in dismissed:
+                    continue
+
+                name_a = a['name'].strip().lower()
+                name_b = b['name'].strip().lower()
+
+                match_type = None
+                confidence = 0.0
+
+                if name_a == name_b:
+                    match_type = 'exact'
+                    confidence = 1.0
+                elif len(name_a) >= 3 and len(name_b) >= 3 and (name_a in name_b or name_b in name_a):
+                    match_type = 'contains'
+                    confidence = 0.8
+                else:
+                    words_a = name_a.split()
+                    words_b = name_b.split()
+                    if (len(words_a) > 1 and len(words_b) > 1 and
+                            len(words_a[0]) >= 3 and words_a[0] == words_b[0]):
+                        match_type = 'first_name'
+                        confidence = 0.6
+
+                if match_type:
+                    pairs.append((a['id'], b['id'], match_type, confidence))
+
+        if not pairs:
+            return []
+
+        # Union-find for transitive grouping
+        parent = {}
+        def find(x):
+            if x not in parent:
+                parent[x] = x
+            if parent[x] != x:
+                parent[x] = find(parent[x])
+            return parent[x]
+        def union(x, y):
+            px, py = find(x), find(y)
+            if px != py:
+                parent[px] = py
+
+        pair_info = {}
+        for a_id, b_id, match_type, confidence in pairs:
+            union(a_id, b_id)
+            pair_info[(min(a_id, b_id), max(a_id, b_id))] = (match_type, confidence)
+
+        # Build groups
+        groups = {}
+        for p in people:
+            pid = p['id']
+            if pid in parent:
+                root = find(pid)
+                if root not in groups:
+                    groups[root] = {'items': [], 'match_type': None, 'confidence': 0.0}
+                groups[root]['items'].append(p)
+
+        # Assign best match_type and confidence per group
+        for (a_id, b_id), (match_type, confidence) in pair_info.items():
+            root = find(a_id)
+            if root in groups and confidence > groups[root]['confidence']:
+                groups[root]['match_type'] = match_type
+                groups[root]['confidence'] = confidence
+
+        result = []
+        for group_data in groups.values():
+            if len(group_data['items']) >= 2:
+                result.append({
+                    'items': group_data['items'],
+                    'match_type': group_data['match_type'],
+                    'confidence': group_data['confidence'],
+                })
+
+        result.sort(key=lambda g: g['confidence'], reverse=True)
+        return result
+
+    except Exception as e:
+        logger.error("find_duplicate_people error: %s", repr(e))
+        return []
+
+
+def find_duplicate_ideas(user_id: int) -> list:
+    """
+    Find potential duplicate ideas using title similarity.
+
+    Match types:
+    - exact (1.0): case-insensitive exact title match
+    - contains (0.8): one title contains the other, both >= 5 chars
+    - word_overlap (0.6): >= 60% shared non-stop words, both >= 3 content words
+
+    Uses union-find for transitive grouping. Filters out dismissed pairs.
+    """
+    STOP_WORDS = {'the', 'a', 'an', 'to', 'for', 'of', 'and', 'in', 'on', 'with', 'is', 'it'}
+
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, title FROM ideas WHERE user_id = %s",
+                (user_id,)
+            )
+            ideas = [dict(r) for r in cursor.fetchall()]
+
+        if len(ideas) < 2:
+            return []
+
+        dismissed = get_dismissed_pairs(user_id, 'ideas')
+
+        def content_words(title):
+            return [w for w in title.lower().split() if w not in STOP_WORDS and len(w) >= 2]
+
+        pairs = []
+        for i in range(len(ideas)):
+            for j in range(i + 1, len(ideas)):
+                a, b = ideas[i], ideas[j]
+                pair_key = (min(a['id'], b['id']), max(a['id'], b['id']))
+                if pair_key in dismissed:
+                    continue
+
+                title_a = a['title'].strip().lower()
+                title_b = b['title'].strip().lower()
+
+                match_type = None
+                confidence = 0.0
+
+                if title_a == title_b:
+                    match_type = 'exact'
+                    confidence = 1.0
+                elif len(title_a) >= 5 and len(title_b) >= 5 and (title_a in title_b or title_b in title_a):
+                    match_type = 'contains'
+                    confidence = 0.8
+                else:
+                    words_a = set(content_words(a['title']))
+                    words_b = set(content_words(b['title']))
+                    if len(words_a) >= 3 and len(words_b) >= 3:
+                        overlap = words_a & words_b
+                        total = words_a | words_b
+                        if total and len(overlap) / len(total) >= 0.6:
+                            match_type = 'word_overlap'
+                            confidence = 0.6
+
+                if match_type:
+                    pairs.append((a['id'], b['id'], match_type, confidence))
+
+        if not pairs:
+            return []
+
+        # Union-find
+        parent = {}
+        def find(x):
+            if x not in parent:
+                parent[x] = x
+            if parent[x] != x:
+                parent[x] = find(parent[x])
+            return parent[x]
+        def union(x, y):
+            px, py = find(x), find(y)
+            if px != py:
+                parent[px] = py
+
+        pair_info = {}
+        for a_id, b_id, match_type, confidence in pairs:
+            union(a_id, b_id)
+            pair_info[(min(a_id, b_id), max(a_id, b_id))] = (match_type, confidence)
+
+        groups = {}
+        for idea in ideas:
+            iid = idea['id']
+            if iid in parent:
+                root = find(iid)
+                if root not in groups:
+                    groups[root] = {'items': [], 'match_type': None, 'confidence': 0.0}
+                groups[root]['items'].append(idea)
+
+        for (a_id, b_id), (match_type, confidence) in pair_info.items():
+            root = find(a_id)
+            if root in groups and confidence > groups[root]['confidence']:
+                groups[root]['match_type'] = match_type
+                groups[root]['confidence'] = confidence
+
+        result = []
+        for group_data in groups.values():
+            if len(group_data['items']) >= 2:
+                result.append({
+                    'items': group_data['items'],
+                    'match_type': group_data['match_type'],
+                    'confidence': group_data['confidence'],
+                })
+
+        result.sort(key=lambda g: g['confidence'], reverse=True)
+        return result
+
+    except Exception as e:
+        logger.error("find_duplicate_ideas error: %s", repr(e))
+        return []
+
+
+def dismiss_duplicate_pair(user_id: int, category: str, id_a: int, id_b: int) -> bool:
+    """Store a normalized dismissed pair (smaller ID always id_a)."""
+    try:
+        normalized_a = min(id_a, id_b)
+        normalized_b = max(id_a, id_b)
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO dismissed_duplicates (user_id, category, id_a, id_b)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (user_id, category, id_a, id_b) DO NOTHING
+            """, (user_id, category, normalized_a, normalized_b))
+            return True
+    except Exception as e:
+        logger.error("dismiss_duplicate_pair error: %s", repr(e))
+        return False
+
+
+def get_dismissed_pairs(user_id: int, category: str) -> set:
+    """Returns set of (id_a, id_b) tuples for filtering duplicate matches."""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id_a, id_b FROM dismissed_duplicates WHERE user_id = %s AND category = %s",
+                (user_id, category)
+            )
+            return {(r['id_a'], r['id_b']) for r in cursor.fetchall()}
+    except Exception as e:
+        logger.error("get_dismissed_pairs error: %s", repr(e))
+        return set()
 
 
 def search_ideas(user_id: int, query: str, limit: int = 20) -> list[dict]:

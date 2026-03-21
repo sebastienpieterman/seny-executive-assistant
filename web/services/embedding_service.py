@@ -88,6 +88,27 @@ class EmbeddingService:
         collection_name = self.COLLECTIONS[entity_type]
         return self.chroma.get_or_create_collection(name=collection_name)
 
+    def delete_embeddings(self, entity_type: str, ids: list) -> int:
+        """Delete vectors from ChromaDB collection by ID list.
+
+        Args:
+            entity_type: One of the COLLECTIONS keys (e.g. 'people', 'ideas')
+            ids: List of document IDs to delete (e.g. ['person_5', 'person_12'])
+
+        Returns:
+            Number of IDs requested for deletion (ChromaDB delete is idempotent).
+        """
+        if not self.enabled or not ids:
+            return 0
+        try:
+            collection = self._get_collection(entity_type)
+            collection.delete(ids=ids)
+            logger.info("delete_embeddings: deleted %d vectors from %s", len(ids), entity_type)
+            return len(ids)
+        except Exception as e:
+            logger.warning("delete_embeddings failed for %s: %s", entity_type, repr(e))
+            return 0
+
     def _embed_texts(self, texts: list, input_type: str = "document") -> list:
         """
         Calls Voyage AI embeddings API in a single batch and returns embedding vectors.

@@ -26,6 +26,9 @@ from web.core.database import (
     get_admin_items_by_user, get_admin_item, update_admin_item, search_admin_items,
     create_person, create_project, create_idea, create_admin_item,
     get_person_followups, get_recent_inbox,
+    merge_people, merge_ideas,
+    find_duplicate_people, find_duplicate_ideas,
+    dismiss_duplicate_pair,
 )
 
 logger = logging.getLogger(__name__)
@@ -673,3 +676,81 @@ async def delete_capture(
         )
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Capture log entry not found")
+
+
+# ============================================================================
+# Merge & Duplicate Endpoints (Phase 78)
+# ============================================================================
+
+
+class MergeRequest(BaseModel):
+    category: str
+    winner_id: int
+    loser_id: int
+
+
+@router.post("/merge")
+async def merge_items(
+    req: MergeRequest,
+    user_id: int = Depends(require_auth),
+):
+    """Merge two records. Winner absorbs loser's data and references."""
+    uid = int(user_id)
+
+    if req.winner_id == req.loser_id:
+        raise HTTPException(status_code=400, detail="Cannot merge an item with itself")
+
+    if req.category == "people":
+        result = merge_people(uid, req.winner_id, req.loser_id)
+    elif req.category == "ideas":
+        result = merge_ideas(uid, req.winner_id, req.loser_id)
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported category: {req.category}")
+
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Merge failed"))
+
+    return result
+
+
+@router.get("/duplicates")
+async def get_duplicates(
+    category: str = Query(None, description="Filter by category: people or ideas"),
+    user_id: int = Depends(require_auth),
+):
+    """Find duplicate records using name/title similarity scanning."""
+    uid = int(user_id)
+    result = {}
+
+    if category is None or category == "people":
+        result["people"] = find_duplicate_people(uid)
+    if category is None or category == "ideas":
+        result["ideas"] = find_duplicate_ideas(uid)
+
+    return result
+
+
+class DismissRequest(BaseModel):
+    category: str
+    ids: list[int]
+
+
+@router.post("/duplicates/dismiss")
+async def dismiss_duplicates(
+    req: DismissRequest,
+    user_id: int = Depends(require_auth),
+):
+    """Dismiss a group of items as not duplicates. All pairs in the group are dismissed."""
+    uid = int(user_id)
+
+    if len(req.ids) < 2:
+        raise HTTPException(status_code=400, detail="Need at least 2 IDs to dismiss")
+
+    # Dismiss all pairs in the group
+    dismissed_count = 0
+    for i in range(len(req.ids)):
+        for j in range(i + 1, len(req.ids)):
+            dismiss_duplicate_pair(uid, req.category, req.ids[i], req.ids[j])
+            dismissed_count += 1
+
+    return {"success": True, "pairs_dismissed": dismissed_count}

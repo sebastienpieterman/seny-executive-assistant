@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Search, X, Brain, GripVertical, Plus } from "lucide-react";
+import { Search, X, Brain, GripVertical, Plus, Copy } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { CategoryTabs, type Category } from "@/components/second-brain/CategoryTabs";
 import { ItemList, type SecondBrainItem } from "@/components/second-brain/ItemList";
@@ -8,6 +8,7 @@ import { AddItemDialog, type Category as AddCategory } from "@/components/second
 import { ActivityFeed } from "@/components/second-brain/ActivityFeed";
 import { CaptureHistory } from "@/components/second-brain/CaptureHistory";
 import { SemanticSearch } from "@/components/second-brain/SemanticSearch";
+import { DuplicatesView } from "@/components/second-brain/DuplicatesView";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
@@ -34,6 +35,7 @@ export function SecondBrainPage() {
   const [detailItem, setDetailItem] = useState<SecondBrainItem | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(400);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [showDuplicates, setShowDuplicates] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
   const searchTimeout = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -207,70 +209,90 @@ export function SecondBrainPage() {
         className="flex h-full flex-col border-r border-border"
         style={{ width: sidebarWidth, minWidth: 400, maxWidth: 500, flexShrink: 0 }}
       >
-        <CategoryTabs active={category} counts={counts} onSelect={setCategory} />
-
-        {/* Search + Add (hidden when semantic search tab is active) */}
-        {category !== "search" && (
-          <div className="border-b border-border px-4 py-2">
-            <div className="flex gap-2">
-              <div className="relative flex-1">
-                <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  value={search}
-                  onChange={(e) => handleSearchChange(e.target.value)}
-                  placeholder="Search items..."
-                  className="pl-9 pr-8"
-                />
-                {search && (
-                  <button
-                    onClick={clearSearch}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
-                )}
-              </div>
-              <Button
-                size="icon"
-                variant="outline"
-                onClick={() => setAddDialogOpen(true)}
-                title="Add new entry"
-              >
-                <Plus className="h-4 w-4" />
-              </Button>
-            </div>
-          </div>
-        )}
-
-        {category === "activity" ? (
-          <ActivityFeed
-            onPersonClick={(personId) => {
-              setCategory("people");
-              handleSelect("people", personId);
-            }}
-          />
-        ) : category === "captures" ? (
-          <CaptureHistory
-            onItemClick={(cat, id) => {
-              setCategory(cat as Parameters<typeof setCategory>[0]);
-              handleSelect(cat, id);
-            }}
-          />
-        ) : category === "search" ? (
-          <SemanticSearch
-            onSelect={(cat, id) => {
-              setCategory(cat as Parameters<typeof setCategory>[0]);
-              handleSelect(cat, id);
+        {showDuplicates ? (
+          <DuplicatesView
+            onBack={() => {
+              setShowDuplicates(false);
+              loadItems(category, search);
+              loadStats();
             }}
           />
         ) : (
-          <ItemList
-            items={items}
-            selectedId={selectedId}
-            selectedCategory={selectedCategory}
-            onSelect={handleSelect}
-            loading={loading}
-          />
+          <>
+            <CategoryTabs active={category} counts={counts} onSelect={setCategory} />
+
+            {/* Search + Add (hidden when semantic search tab is active) */}
+            {category !== "search" && (
+              <div className="border-b border-border px-4 py-2">
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                    <Input
+                      value={search}
+                      onChange={(e) => handleSearchChange(e.target.value)}
+                      placeholder="Search items..."
+                      className="pl-9 pr-8"
+                    />
+                    {search && (
+                      <button
+                        onClick={clearSearch}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    )}
+                  </div>
+                  <Button
+                    size="icon"
+                    variant="outline"
+                    onClick={() => setShowDuplicates(true)}
+                    title="Find duplicates"
+                  >
+                    <Copy className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="outline"
+                    onClick={() => setAddDialogOpen(true)}
+                    title="Add new entry"
+                  >
+                    <Plus className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {category === "activity" ? (
+              <ActivityFeed
+                onPersonClick={(personId) => {
+                  setCategory("people");
+                  handleSelect("people", personId);
+                }}
+              />
+            ) : category === "captures" ? (
+              <CaptureHistory
+                onItemClick={(cat, id) => {
+                  setCategory(cat as Parameters<typeof setCategory>[0]);
+                  handleSelect(cat, id);
+                }}
+              />
+            ) : category === "search" ? (
+              <SemanticSearch
+                onSelect={(cat, id) => {
+                  setCategory(cat as Parameters<typeof setCategory>[0]);
+                  handleSelect(cat, id);
+                }}
+              />
+            ) : (
+              <ItemList
+                items={items}
+                selectedId={selectedId}
+                selectedCategory={selectedCategory}
+                onSelect={handleSelect}
+                loading={loading}
+              />
+            )}
+          </>
         )}
       </div>
 
