@@ -8936,22 +8936,29 @@ def get_next_drip_nudge(user_id: int) -> Optional[dict]:
                 SELECT n.id, n.nudge_type, n.title, n.body, n.urgency,
                        n.source_type, n.source_id, n.created_at,
                        n.closure_delay_count, n.closure_hold_until,
-                       da.deadline
+                       da.deadline, cen.event_start
                 FROM nudges n
                 LEFT JOIN detected_actions da
                     ON n.source_type = 'detected_action' AND n.source_id = da.id
+                LEFT JOIN calendar_event_nudges cen
+                    ON cen.nudge_id = n.id
                 WHERE n.user_id = %s
                   AND n.status = 'pending'
                   AND n.batch_id IS NULL
                   AND (n.closure_hold_until IS NULL OR n.closure_hold_until <= NOW())
                   AND NOT (
-                      n.nudge_type IN ('meeting_prep', 'calendar_event')
-                      AND n.created_at < NOW() - INTERVAL '6 hours'
+                      n.nudge_type = 'meeting_prep'
+                      AND n.created_at < NOW() - INTERVAL '90 minutes'
+                  )
+                  AND NOT (
+                      n.nudge_type = 'calendar_event'
+                      AND n.created_at < NOW() - INTERVAL '5 hours'
                   )
                 ORDER BY
-                    CASE WHEN da.deadline IS NOT NULL AND da.deadline::timestamptz > NOW()
+                    CASE WHEN COALESCE(da.deadline, cen.event_start) IS NOT NULL
+                              AND COALESCE(da.deadline::timestamptz, cen.event_start::timestamptz) > NOW()
                          THEN 0 ELSE 1 END ASC,
-                    da.deadline::timestamptz ASC NULLS LAST,
+                    COALESCE(da.deadline::timestamptz, cen.event_start::timestamptz) ASC NULLS LAST,
                     CASE WHEN n.urgency = 'urgent' THEN 0 ELSE 1 END ASC,
                     n.created_at ASC
                 LIMIT 1
@@ -11321,6 +11328,23 @@ def cancel_event_nudge_sequence(user_id: int, event_id: str) -> int:
         return 0
 
 
+def get_pending_event_sequences(user_id: int) -> list:
+    """Return distinct (event_id, event_start, event_title) for all pending nudge sequences for a user."""
+    try:
+        with get_db() as db:
+            cursor = db.cursor()
+            cursor.execute("""
+                SELECT DISTINCT event_id, event_start, event_title
+                FROM calendar_event_nudges
+                WHERE user_id = %s AND status = 'pending'
+            """, (user_id,))
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        _cal_nudge_logger.error(f"get_pending_event_sequences error: {repr(e)}")
+        return []
+
+
 # ============================================================================
 # SECTION: Screen Agent API Key Helpers
 # ============================================================================
@@ -11957,6 +11981,62 @@ def set_lcd_layer1(user_id: int, content: str) -> None:
         _lcd_logger.error("lcd DB error: %s", repr(e))
 
 
+def _resolve_nudges_from_lcd(user_id: int, observation_content: str, conn):
+    """Phase 77: Auto-dismiss pending nudges whose title matches the LCD observation.
+
+    Scans pending (unbatched) nudges and dismisses any whose title shares
+    >=2 significant words (4+ chars) with the observation content.
+    Also closes the underlying detected_action source when applicable.
+
+    Called inside the same transaction as append_lcd_observation() -- uses
+    the caller's connection so dismissals commit atomically with the INSERT.
+    Fail-open: callers wrap this in try/except.
+    """
+    # Extract significant words (4+ chars) from observation
+    words = re.findall(r'\b[a-zA-Z]{4,}\b', observation_content)
+    if not words:
+        return
+    # Limit to first 10 to keep matching bounded
+    sig_words = {w.lower() for w in words[:10]}
+    if len(sig_words) < 2:
+        return  # Need at least 2 significant words to match
+
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, nudge_type, title, source_type, source_id"
+        " FROM nudges"
+        " WHERE user_id = %s AND status = 'pending' AND batch_id IS NULL",
+        (user_id,)
+    )
+    pending = cursor.fetchall()
+    if not pending:
+        return
+
+    for nudge in pending:
+        nudge_title = nudge['title'] or ''
+        title_words = {w.lower() for w in re.findall(r'\b[a-zA-Z]{4,}\b', nudge_title)}
+        overlap = sig_words & title_words
+        if len(overlap) >= 2:
+            cursor.execute(
+                "UPDATE nudges SET status = 'dismissed', dismiss_reason = %s WHERE id = %s",
+                (
+                    f"lcd_proactive_resolution: observation matched nudge title ({', '.join(sorted(overlap))})",
+                    nudge['id'],
+                )
+            )
+            _lcd_logger.info(
+                "lcd proactive resolution: dismissed nudge %s (overlap: %s)",
+                nudge['id'], overlap
+            )
+            # Close underlying detected_action if applicable
+            if nudge['source_type'] == 'detected_action' and nudge['source_id']:
+                cursor.execute(
+                    "UPDATE detected_actions SET status = 'dismissed'"
+                    " WHERE id = %s AND status != 'dismissed'",
+                    (nudge['source_id'],)
+                )
+
+
 def append_lcd_observation(user_id: int, source: str, content: str):
     try:
         with get_db() as conn:
@@ -11980,6 +12060,11 @@ def append_lcd_observation(user_id: int, source: str, content: str):
                 "INSERT INTO lcd_layer1 (user_id, content, updated_at) VALUES (%s, '', NOW()) ON CONFLICT (user_id) DO UPDATE SET layer2_synthesized_at = NULL",
                 (user_id,)
             )
+            # Phase 77: proactive LCD resolution -- auto-dismiss matching nudges
+            try:
+                _resolve_nudges_from_lcd(user_id, content, conn)
+            except Exception as _resolve_err:
+                _lcd_logger.warning("lcd proactive resolution hook failed (non-blocking): %s", repr(_resolve_err))
             return row['id'] if row else None
     except Exception as e:
         _lcd_logger.error("lcd DB error: %s", repr(e))

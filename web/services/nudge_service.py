@@ -60,11 +60,19 @@ logger = logging.getLogger(__name__)
 #
 # Resolution chain for each INCLUDE type:
 #   detected_action:
-#     nudge.source_id → detected_actions.id
-#     → detected_actions.scanned_item_id → scanned_items.id
-#     → item_classifications.scanned_item_id → item_classifications.thread_id
+#     nudge.source_id -> detected_actions.id
+#     -> detected_actions.scanned_item_id -> scanned_items.id
+#     -> item_classifications.scanned_item_id -> item_classifications.thread_id
+#   overdue_task: lightweight DB check on tasks.status (Phase 75-01)
+#   nudge_followup: lightweight DB check on nudges.user_response/acted_at (Phase 75-01)
+#   relationship_check: person name -> outbound message search (Phase 75-01)
+#   open_followup: person name -> outbound message search (Phase 75-01)
 CLOSURE_CHECK_INCLUDE = frozenset([
     "detected_action",
+    "overdue_task",
+    "nudge_followup",
+    "relationship_check",
+    "open_followup",
 ])
 
 # Nudge types explicitly excluded from closure check.
@@ -75,20 +83,15 @@ CLOSURE_CHECK_EXCLUDE_TIME_SENSITIVE = frozenset([
     "urgent_item",
 ])
 
-# Nudge types with no thread to resolve (person-level or non-thread-anchored nudges).
-# No specific conversation thread to anchor context on:
-#   open_followup: source_type='followup' → followups table has no thread_id
+# Nudge types with no thread to resolve AND no lightweight closure handler.
+# These skip closure checks entirely:
 #   needs_reply: digest-only category, not created as standalone drip nudges
-#   relationship_check: source_type='person' → person-level, no thread
-#   relationship_checkin_prompt: source_type='person' → person-level, no thread
-#   overdue_task: source_type='task' → tasks table has no thread_id
-#   priority_context: source_type='priority_context' → priority items have no thread
+#   relationship_checkin_prompt: source_type='person' -> person-level, no thread
+#   priority_context: source_type='priority_context' -> priority items have no thread
+# NOTE: overdue_task, relationship_check, open_followup moved to INCLUDE in Phase 75-01
 CLOSURE_CHECK_NO_THREAD = frozenset([
-    "open_followup",
     "needs_reply",
-    "relationship_check",
     "relationship_checkin_prompt",
-    "overdue_task",
     "priority_context",
 ])
 
@@ -451,6 +454,35 @@ class NudgeService:
         if not pending_nudges:
             return result
 
+        # Phase 73: Per-nudge freshness filtering -- dismiss stale nudges before batching
+        fresh_nudges = []
+        for pn in pending_nudges:
+            try:
+                is_stale, stale_reason = await self.is_nudge_stale(pn)
+                if is_stale:
+                    try:
+                        with get_db() as conn:
+                            cursor = conn.cursor()
+                            cursor.execute(
+                                "UPDATE nudges SET status = 'dismissed', dismiss_reason = %s WHERE id = %s",
+                                (f"freshness_gate: {stale_reason}", pn.get('id'))
+                            )
+                        logger.info(
+                            "Batch freshness: dismissed stale nudge %s for user %d: %s",
+                            pn.get('id'), self.user_id, stale_reason
+                        )
+                    except Exception:
+                        pass  # Fail open -- dismiss is best-effort
+                    continue
+            except Exception:
+                pass  # Fail open -- include nudge on error
+            fresh_nudges.append(pn)
+
+        if not fresh_nudges:
+            logger.info("All %d batch nudges were stale for user %d", len(pending_nudges), self.user_id)
+            return result
+        pending_nudges = fresh_nudges
+
         # Generate batch ID and format the digest
         batch_id = str(uuid.uuid4())[:8]
         title, body = self.format_batch_digest(pending_nudges)
@@ -628,6 +660,30 @@ class NudgeService:
             except Exception as e:
                 logger.warning("Feedback pre-check failed for user %d: %s", self.user_id, repr(e))
                 # Fail open — never block delivery on a DB error
+
+        # Phase 73: Universal freshness gate -- check is_nudge_stale() before creating
+        # the nudge record. Skip for batch (aggregate wrapper) and screen_agent (ephemeral).
+        if nudge_type != 'batch' and source_type != 'screen_agent':
+            try:
+                freshness_item = {
+                    'id': None,
+                    'title': title,
+                    'body': body,
+                    'nudge_type': nudge_type,
+                    'source_type': source_type,
+                    'source_id': source_id,
+                    'created_at': datetime.now().isoformat(),
+                }
+                is_stale, stale_reason = await self.is_nudge_stale(freshness_item)
+                if is_stale:
+                    logger.info(
+                        "Freshness gate suppressed nudge for user %d: %s -- %s",
+                        self.user_id, nudge_type, stale_reason
+                    )
+                    return {"success": False, "suppressed": True, "reason": f"freshness_gate: {stale_reason}"}
+            except Exception as e:
+                logger.warning("Freshness gate error for user %d: %s", self.user_id, repr(e))
+                # Fail open -- never let a freshness check block delivery on error
 
         # Create nudge record first to get ID for feedback links
         nudge_id = create_nudge(
@@ -1673,7 +1729,7 @@ class NudgeService:
                 cursor = conn.cursor()
                 cursor.execute("""
                     SELECT n.id, n.nudge_type, n.title, n.body, n.urgency,
-                           n.source_type, n.source_id,
+                           n.source_type, n.source_id, n.created_at,
                            da.person_name, da.action_text
                     FROM nudges n
                     LEFT JOIN detected_actions da
@@ -2283,8 +2339,9 @@ class NudgeService:
                     if created_dt_tr.tzinfo is None:
                         created_dt_tr = created_dt_tr.replace(tzinfo=_tz_tr.utc)
                     age_hours_tr = (datetime.now(_tz_tr.utc) - created_dt_tr).total_seconds() / 3600
-                    if age_hours_tr > 4:
-                        reason = f"Title references 'in X hours/minutes' but nudge is {age_hours_tr:.0f}h old — event has passed"
+                    if age_hours_tr > 1.5:
+                        age_min_tr = int(age_hours_tr * 60)
+                        reason = f"Title references 'in X hours/minutes' but nudge is {age_min_tr}min old -- event has passed"
                         logger.info("Stale (time-reference expired) nudge %s: %s", item.get('id'), reason)
                         return (True, reason)
                 except (ValueError, TypeError):
@@ -2303,8 +2360,10 @@ class NudgeService:
                     if created_dt.tzinfo is None:
                         created_dt = created_dt.replace(tzinfo=_tz_cal.utc)
                     age_hours = (datetime.now(_tz_cal.utc) - created_dt).total_seconds() / 3600
-                    if age_hours > 6:
-                        reason = f"{nudge_type} nudge is {age_hours:.0f}h old — event has passed"
+                    max_age = 1.5 if nudge_type == 'meeting_prep' else 5.0
+                    if age_hours > max_age:
+                        age_min = int(age_hours * 60)
+                        reason = f"{nudge_type} nudge is {age_min}min old (limit {int(max_age * 60)}min) -- event has passed"
                         logger.info("Stale (calendar age) nudge %s: %s", item.get('id'), reason)
                         return (True, reason)
                 except (ValueError, TypeError):
@@ -2325,6 +2384,99 @@ class NudgeService:
                         return (True, reason)
                 except (ValueError, TypeError):
                     pass  # Unparseable deadline — fall through to Claude check
+
+            # Phase 73: Task completion check -- overdue_task nudges for completed tasks
+            if nudge_type == 'overdue_task' and item.get('source_type') == 'task' and item.get('source_id'):
+                try:
+                    with get_db() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "SELECT status FROM tasks WHERE id = %s AND user_id = %s",
+                            (item['source_id'], self.user_id)
+                        )
+                        task_row = cursor.fetchone()
+                        if task_row:
+                            task_status = task_row['status'] if isinstance(task_row, dict) else task_row[0]
+                            if task_status == 'completed':
+                                reason = f"Task {item['source_id']} is already completed"
+                                logger.info("Stale (task completed) nudge %s: %s", item.get('id'), reason)
+                                return (True, reason)
+                except Exception:
+                    pass  # Fail open
+
+            # Phase 73: Calendar event cancellation check
+            if nudge_type in ('meeting_prep', 'calendar_event') and item.get('source_id'):
+                try:
+                    with get_db() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "SELECT status FROM calendar_event_nudges WHERE id = %s AND user_id = %s",
+                            (item['source_id'], self.user_id)
+                        )
+                        evt_row = cursor.fetchone()
+                        if evt_row:
+                            evt_status = evt_row['status'] if isinstance(evt_row, dict) else evt_row[0]
+                            if evt_status == 'cancelled':
+                                reason = f"Calendar event {item['source_id']} was cancelled"
+                                logger.info("Stale (event cancelled) nudge %s: %s", item.get('id'), reason)
+                                return (True, reason)
+                except Exception:
+                    pass  # Fail open
+
+            # Phase 73: Detected action thread reply check -- if user already replied
+            if nudge_type == 'detected_action' and item.get('source_type') == 'detected_action' and item.get('source_id'):
+                try:
+                    with get_db() as conn:
+                        cursor = conn.cursor()
+                        # Resolve: detected_actions -> scanned_items -> item_classifications.thread_id
+                        cursor.execute("""
+                            SELECT ic.thread_id
+                            FROM detected_actions da
+                            JOIN scanned_items si ON si.id = da.scanned_item_id
+                            JOIN item_classifications ic ON ic.scanned_item_id = si.id
+                            WHERE da.id = %s
+                            AND ic.thread_id IS NOT NULL
+                            LIMIT 1
+                        """, (item['source_id'],))
+                        thread_row = cursor.fetchone()
+                        if thread_row:
+                            thread_id = thread_row['thread_id'] if isinstance(thread_row, dict) else thread_row[0]
+                            # Check if user sent outbound message in same thread after nudge creation
+                            nudge_created = item.get('created_at', '')
+                            cursor.execute("""
+                                SELECT 1 FROM scanned_items si2
+                                JOIN item_classifications ic2 ON ic2.scanned_item_id = si2.id
+                                WHERE si2.user_id = %s
+                                  AND ic2.thread_id = %s
+                                  AND si2.direction = 'outbound'
+                                  AND si2.detected_at > %s
+                                LIMIT 1
+                            """, (self.user_id, thread_id, str(nudge_created)))
+                            reply_row = cursor.fetchone()
+                            if reply_row:
+                                reason = f"User already replied in thread {thread_id} after nudge creation"
+                                logger.info("Stale (thread reply) nudge %s: %s", item.get('id'), reason)
+                                return (True, reason)
+                except Exception:
+                    pass  # Fail open
+
+            # Phase 73: LCD Layer 2 observation word-match -- if recent observations
+            # contain >=2 significant words from the nudge title, the topic was
+            # recently observed and the nudge may be redundant.
+            try:
+                from web.core.database import get_recent_lcd_observations
+                _words = [w.lower() for w in title.split() if len(w) >= 4]
+                if _words:
+                    lcd_obs = get_recent_lcd_observations(self.user_id, limit=30)
+                    for obs in lcd_obs:
+                        obs_text = (obs.get('content') or '').lower()
+                        matched = sum(1 for w in _words if w in obs_text)
+                        if matched >= 2:
+                            reason = f"LCD observation matches {matched} words from title"
+                            logger.info("Stale (LCD observation match) nudge %s: %s", item.get('id'), reason)
+                            return (True, reason)
+            except Exception:
+                pass  # Fail open
 
             # Gather active priority context items
             priority_items = get_priority_items(self.user_id, status='active', limit=20)
@@ -2389,9 +2541,9 @@ User's active commitments and priorities:
 Decide: is this reminder still worth sending TODAY?
 
 Rules:
-- Deliverables (tasks, emails to write, documents, follow-ups, blog posts): ALWAYS worth sending, even if overdue. Mark as NOT stale.
-- Time-bound events that have already ended (meetings, appointments, calls, scheduled demos): Mark as STALE if the event time has clearly passed based on context clues or the queued date.
-- When uncertain: mark as NOT stale. It's better to send an unnecessary reminder than to silently drop a valid one.
+- EVENTS (meetings, appointments, calls, demos, interviews, scheduled sessions): These are time-bound. If the event time has clearly passed based on the queued date or context clues, mark as STALE. Events more than 90 minutes old are almost certainly past.
+- DELIVERABLES (tasks, emails to write, documents, follow-ups, blog posts, messages to send): These are NOT time-bound. Even if overdue or days old, they are still worth sending. Mark as NOT stale.
+- When uncertain whether something is an event or deliverable: mark as NOT stale. Better to send an unnecessary reminder than drop a valid one.
 
 Respond with JSON only, no other text:
 {{"stale": true or false, "reason": "one sentence explanation"}}"""
@@ -2506,13 +2658,20 @@ Respond with JSON only, no other text:
         if not item:
             return result
 
-        # ── Loop closure check ───────────────────────────────
-        # Only run for nudge types with a resolvable conversation thread.
-        # Failures always default to sending — never block on closure check error.
+        # -- Loop closure check (Phase 70.1-02, expanded Phase 75-01) ----------
+        # Type-routed closure detection:
+        #   detected_action -> Haiku thread analysis (get_closure_context + check_nudge_closure)
+        #   overdue_task -> DB check on tasks.status
+        #   nudge_followup -> DB check on nudges.user_response/acted_at
+        #   relationship_check / open_followup -> person name + outbound message search
+        # Failures always default to sending -- never block on closure check error.
         try:
             from web.services.closure_check import (
                 get_closure_context,
                 check_nudge_closure,
+                check_overdue_task_closure,
+                check_nudge_followup_closure,
+                check_person_contact_closure,
                 CLOSURE_CHECK_INCLUDE,
                 CLOSURE_CHECK_EXCLUDE_TIME_SENSITIVE,
             )
@@ -2527,44 +2686,55 @@ Respond with JSON only, no other text:
                 delay_count = item.get('closure_delay_count', 0) or 0
 
                 if delay_count >= 1:
-                    # Already been delayed once — send regardless
+                    # Already been delayed once -- send regardless
                     logger.info(
-                        "[closure] nudge %d type=%s: max delay reached — sending",
+                        "[closure] nudge %d type=%s: max delay reached -- sending",
                         item['id'], nudge_type
                     )
                 else:
-                    context = get_closure_context(item, self.user_id)
+                    loop_closed = False
 
-                    if context is None:
-                        # Could not resolve thread — send
-                        logger.debug(
-                            "[closure] nudge %d: no context resolved — sending",
-                            item['id']
-                        )
-                    else:
-                        loop_closed = await check_nudge_closure(item, context)
-
-                        if loop_closed:
-                            # Delay 48h and skip this send
-                            with get_db() as conn:
-                                conn.cursor().execute("""
-                                    UPDATE nudges
-                                    SET closure_hold_until = NOW() + INTERVAL '48 hours',
-                                        closure_delay_count = closure_delay_count + 1
-                                    WHERE id = %s
-                                """, (item['id'],))
-                            logger.info(
-                                "[closure] nudge %d type=%s: loop appears closed — delayed 48h",
-                                item['id'], nudge_type
+                    if nudge_type == 'detected_action':
+                        # Original Haiku thread analysis path (unchanged)
+                        context = get_closure_context(item, self.user_id)
+                        if context is None:
+                            logger.debug(
+                                "[closure] nudge %d: no context resolved -- sending",
+                                item['id']
                             )
-                            return result  # sent=False; nudge stays pending, hold set
+                        else:
+                            loop_closed = await check_nudge_closure(item, context)
+
+                    elif nudge_type == 'overdue_task':
+                        loop_closed = check_overdue_task_closure(item, self.user_id)
+
+                    elif nudge_type == 'nudge_followup':
+                        loop_closed = check_nudge_followup_closure(item, self.user_id)
+
+                    elif nudge_type in ('relationship_check', 'open_followup'):
+                        loop_closed = check_person_contact_closure(item, self.user_id)
+
+                    if loop_closed:
+                        # Delay 48h and skip this send
+                        with get_db() as conn:
+                            conn.cursor().execute("""
+                                UPDATE nudges
+                                SET closure_hold_until = NOW() + INTERVAL '48 hours',
+                                    closure_delay_count = closure_delay_count + 1
+                                WHERE id = %s
+                            """, (item['id'],))
+                        logger.info(
+                            "[closure] nudge %d type=%s: loop appears closed -- delayed 48h",
+                            item['id'], nudge_type
+                        )
+                        return result  # sent=False; nudge stays pending, hold set
 
         except Exception as _closure_err:
             logger.warning(
-                "[closure] nudge %d: closure check failed unexpectedly: %r — sending",
+                "[closure] nudge %d: closure check failed unexpectedly: %r -- sending",
                 item['id'], _closure_err
             )
-        # ── End closure check ────────────────────────────────────────────────
+        # -- End closure check ------------------------------------------------
 
         # Format as conversational message
         body = self.format_drip_message(item)

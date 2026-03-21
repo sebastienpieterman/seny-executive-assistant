@@ -109,14 +109,20 @@ def _build_nudge_sequence(
 
 async def sync_upcoming_calendar_nudges():
     """
-    Daily job: scan all upcoming calendar events for all users and schedule
-    nudge sequences for any event that doesn't already have one.
+    Hourly job: collect live calendar events, reconcile against pending nudge
+    sequences (cancel deleted/rescheduled), then create sequences for new events.
 
-    Handles both Google Calendar and Outlook Calendar connections.
-    Skips events in the past. Idempotent — has_event_nudge_sequence() prevents duplicates.
+    Three-phase flow:
+      1. COLLECT -- fetch events from all accounts (Google + Outlook) per user
+      2. RECONCILE -- cancel sequences whose event disappeared or was rescheduled
+      3. CREATE -- schedule nudge sequences for events that don't have one yet
+
+    Safety: if an API call fails for one account, that account's events are NOT
+    included in the live_events set, so we never mass-cancel due to a network blip.
     """
     from web.core.database import (
         get_db, has_event_nudge_sequence, schedule_event_nudge_sequence,
+        cancel_event_nudge_sequence, get_pending_event_sequences,
         get_nudge_preferences
     )
     from web.services.calendar_service import CalendarService
@@ -127,7 +133,6 @@ async def sync_upcoming_calendar_nudges():
         with get_db() as db:
             cursor = db.cursor()
             cursor.execute("SELECT id FROM users")
-
             users = cursor.fetchall()
     except Exception as e:
         logger.error("sync_upcoming_calendar_nudges: DB error fetching users: %s", repr(e))
@@ -143,85 +148,159 @@ async def sync_upcoming_calendar_nudges():
                     "SELECT digest_timezone, day_start_hour FROM user_settings WHERE user_id = %s",
                     (user_id,)
                 )
-
                 settings_row = cursor.fetchone()
             user_tz = (settings_row['digest_timezone'] if settings_row else None) or 'America/Chicago'
             day_start = (settings_row['day_start_hour'] if settings_row else None) or 15
+
+            # ==============================================================
+            # PHASE 1: COLLECT -- fetch all live events into a lookup dict
+            # ==============================================================
+            # live_events maps event_id -> { 'start': str, 'event': dict }
+            live_events: dict = {}
+            # Track which accounts succeeded so we only reconcile against
+            # accounts whose data we actually received.
+            successful_account_event_ids: set = set()
 
             # --- Google Calendar ---
             try:
                 google_accounts = CalendarService.list_connected_accounts(user_id)
                 for account in google_accounts:
                     email = account['email']
-                    cal = CalendarService(user_id, email)
-                    events = await cal.get_events(days_ahead=14, timezone=user_tz)
-                    for event in events:
-                        event_id = event.get('id', '')
-                        if not event_id or has_event_nudge_sequence(user_id, event_id):
+                    try:
+                        cal = CalendarService(user_id, email)
+                        all_calendars = await cal.get_all_calendars()
+                        nudge_calendar_ids = [
+                            c['id'] for c in all_calendars
+                            if c.get('access_role') in ('owner', 'writer')
+                        ]
+                        if not nudge_calendar_ids:
                             continue
-                        # CalendarService._format_event() returns start/end as strings,
-                        # is_all_day as bool — NOT raw Google API dicts.
-                        event_start = event.get('start', '')
-                        event_end = event.get('end')
-                        is_all_day = event.get('is_all_day', False)
-                        attendees = event.get('attendees', [])
-                        attendees_json = json.dumps([a.get('email', '') for a in attendees]) if attendees else None
-                        description = event.get('description') or event.get('summary', '')
-                        title = event.get('summary', 'Calendar Event')
-
-                        nudge_rows = _build_nudge_sequence(
-                            event_id, title, event_start, event_end,
-                            is_all_day, user_tz, day_start
+                        events = await cal.get_all_events(
+                            days_ahead=14, timezone=user_tz,
+                            calendar_ids=nudge_calendar_ids
                         )
-                        if nudge_rows:
-                            created = schedule_event_nudge_sequence(
-                                user_id, event_id, title, event_start, event_end,
-                                is_all_day, attendees_json, description, nudge_rows
-                            )
-                            if created:
-                                logger.info(
-                                    "sync_upcoming_calendar_nudges: created %d-row sequence for user=%s event='%s' start=%s",
-                                    len(nudge_rows), user_id, title[:40], event_start
-                                )
+                        for event in events:
+                            eid = event.get('id', '')
+                            if eid:
+                                live_events[eid] = {
+                                    'start': event.get('start', ''),
+                                    'event': event,
+                                }
+                                successful_account_event_ids.add(eid)
+                    except Exception as e:
+                        logger.error(
+                            "sync_upcoming_calendar_nudges: Google fetch error user=%s account=%s: %s",
+                            user_id, email, repr(e)
+                        )
+                        # Do NOT add this account's events -- partial failure safety
             except Exception as e:
-                logger.error("sync_upcoming_calendar_nudges: Google error user=%s: %s", user_id, repr(e))
+                logger.error("sync_upcoming_calendar_nudges: Google accounts error user=%s: %s", user_id, repr(e))
 
             # --- Outlook Calendar ---
             try:
                 outlook_accounts = OutlookCalendarService.list_connected_accounts(user_id)
                 for account in outlook_accounts:
                     email = account['email']
-                    cal = OutlookCalendarService(user_id, email)
-                    events = await cal.get_events(days_ahead=14)
-                    for event in events:
-                        event_id = event.get('id', '')
-                        if not event_id or has_event_nudge_sequence(user_id, event_id):
-                            continue
-                        event_start = event.get('start', '')
-                        # Detect all-day: date-only string (no 'T')
-                        is_all_day = 'T' not in event_start and len(event_start) == 10
-                        event_end = event.get('end')
-                        title = event.get('subject') or event.get('summary', 'Calendar Event')
-                        attendees = event.get('attendees', [])
-                        attendees_json = json.dumps(attendees) if attendees else None
-                        description = event.get('body') or event.get('description', '')
-
-                        nudge_rows = _build_nudge_sequence(
-                            event_id, title, event_start, event_end,
-                            is_all_day, user_tz, day_start
+                    try:
+                        cal = OutlookCalendarService(user_id, email)
+                        events = await cal.get_events(days_ahead=14)
+                        for event in events:
+                            eid = event.get('id', '')
+                            if eid:
+                                live_events[eid] = {
+                                    'start': event.get('start', ''),
+                                    'event': event,
+                                }
+                                successful_account_event_ids.add(eid)
+                    except Exception as e:
+                        logger.error(
+                            "sync_upcoming_calendar_nudges: Outlook fetch error user=%s account=%s: %s",
+                            user_id, email, repr(e)
                         )
-                        if nudge_rows:
-                            schedule_event_nudge_sequence(
-                                user_id, event_id, title, event_start, event_end,
-                                is_all_day, attendees_json, description, nudge_rows
-                            )
             except Exception as e:
-                logger.error("sync_upcoming_calendar_nudges: Outlook error user=%s: %s", user_id, repr(e))
+                logger.error("sync_upcoming_calendar_nudges: Outlook accounts error user=%s: %s", user_id, repr(e))
+
+            # ==============================================================
+            # PHASE 2: RECONCILE -- cancel sequences for deleted/rescheduled events
+            # ==============================================================
+            if successful_account_event_ids:
+                pending = get_pending_event_sequences(user_id)
+                for seq in pending:
+                    seq_event_id = seq['event_id']
+                    seq_event_start = seq.get('event_start', '')
+                    seq_title = seq.get('event_title', '(unknown)')
+
+                    if seq_event_id not in live_events:
+                        # Event no longer exists -- cancelled or moved outside window
+                        cancelled_count = cancel_event_nudge_sequence(user_id, seq_event_id)
+                        if cancelled_count:
+                            logger.info(
+                                "sync_upcoming_calendar_nudges: cancelled %d nudges for DELETED event user=%s event='%s' id=%s",
+                                cancelled_count, user_id, seq_title[:40], seq_event_id
+                            )
+                    else:
+                        # Event exists -- check if start time changed (rescheduled)
+                        live_start = live_events[seq_event_id]['start']
+                        if seq_event_start and live_start and seq_event_start != live_start:
+                            cancelled_count = cancel_event_nudge_sequence(user_id, seq_event_id)
+                            if cancelled_count:
+                                logger.info(
+                                    "sync_upcoming_calendar_nudges: cancelled %d nudges for RESCHEDULED event user=%s event='%s' old_start=%s new_start=%s",
+                                    cancelled_count, user_id, seq_title[:40], seq_event_start, live_start
+                                )
+
+            # ==============================================================
+            # PHASE 3: CREATE -- schedule sequences for new events
+            # ==============================================================
+            for eid, entry in live_events.items():
+                if has_event_nudge_sequence(user_id, eid):
+                    continue
+
+                event = entry['event']
+                event_start = event.get('start', '')
+                event_end = event.get('end')
+
+                # Detect Google vs Outlook event shape
+                if 'is_all_day' in event:
+                    # Google Calendar -- CalendarService._format_event() provides is_all_day
+                    is_all_day = event.get('is_all_day', False)
+                    title = event.get('summary', 'Calendar Event')
+                    attendees = event.get('attendees', [])
+                    attendees_json = json.dumps([a.get('email', '') for a in attendees]) if attendees else None
+                    description = event.get('description') or event.get('summary', '')
+                else:
+                    # Outlook Calendar
+                    is_all_day = 'T' not in event_start and len(event_start) == 10
+                    title = event.get('subject') or event.get('summary', 'Calendar Event')
+                    attendees = event.get('attendees', [])
+                    attendees_json = json.dumps(attendees) if attendees else None
+                    description = event.get('body') or event.get('description', '')
+
+                nudge_rows = _build_nudge_sequence(
+                    eid, title, event_start, event_end,
+                    is_all_day, user_tz, day_start
+                )
+                if nudge_rows:
+                    created = schedule_event_nudge_sequence(
+                        user_id, eid, title, event_start, event_end,
+                        is_all_day, attendees_json, description, nudge_rows
+                    )
+                    if created:
+                        logger.info(
+                            "sync_upcoming_calendar_nudges: created %d-row sequence for user=%s event='%s' start=%s",
+                            len(nudge_rows), user_id, title[:40], event_start
+                        )
 
         except Exception as e:
             logger.error("sync_upcoming_calendar_nudges: error for user=%s: %s", user_id, repr(e))
 
     logger.info("sync_upcoming_calendar_nudges: complete")
+
+    try:
+        from web.core.database import update_heartbeat as _update_heartbeat
+        _update_heartbeat("calendar-nudge-sync")
+    except Exception:
+        pass
 
 
 async def process_calendar_event_nudges():
@@ -851,7 +930,7 @@ async def process_inbound_classification():
     """
     Process newly scanned items through the classification pipeline.
 
-    Runs every 20 minutes. Processes one batch (50 items) per user per run.
+    Runs every 10 minutes. Processes one batch (50 items) per user per run.
     If there's a backlog, it drains over multiple cycles rather than blocking.
     """
     from web.services.inbound_processor import InboundProcessor
@@ -1138,7 +1217,7 @@ async def process_urgent_nudges():
     """
     Process urgent nudges for all users with nudge_enabled.
 
-    Runs every 10 minutes. Queries pending detected_actions, urgent classifications,
+    Runs every 5 minutes. Queries pending detected_actions, urgent classifications,
     and overdue tasks. Routes to nudge queue respecting quiet hours, dedup, rate limits.
     """
     # Import inside function to avoid circular imports
@@ -1953,13 +2032,13 @@ def start_scheduler():
         coalesce=True,
     )
 
-    # Inbound classification processing: every 20 minutes
+    # Inbound classification processing: every 10 minutes
     # Runs after scanner sources typically complete, classifies new items
     scheduler.add_job(
         process_inbound_classification,
-        IntervalTrigger(minutes=20, jitter=60),
+        IntervalTrigger(minutes=10, jitter=30),
         id='inbound_classification',
-        name='Inbound Classification (every 20 min)',
+        name='Inbound Classification (every 10 min)',
         replace_existing=True,
         max_instances=1,
         coalesce=True,
@@ -1969,13 +2048,13 @@ def start_scheduler():
     # Nudge Jobs - (Autonomous Nudges)
     # ========================================================================
 
-    # Urgent nudge processing: every 10 minutes
+    # Urgent nudge processing: every 5 minutes
     # Processes pending detected_actions, urgent classifications, overdue tasks
     scheduler.add_job(
         process_urgent_nudges,
-        IntervalTrigger(minutes=10, jitter=30),
+        IntervalTrigger(minutes=5, jitter=15),
         id='urgent_nudge_processor',
-        name='Urgent Nudges (every 10 min)',
+        name='Urgent Nudges (every 5 min)',
         replace_existing=True,
         max_instances=1,
         coalesce=True,
@@ -2197,19 +2276,19 @@ def start_scheduler():
     # Calendar → Nudge Bridge
     # ========================================================================
 
-    # Sync upcoming calendar events and schedule nudge sequences: daily at 14:00 UTC
-    # (runs before the user's ~3pm day start; idempotent — safe to run daily)
+    # Sync upcoming calendar events, reconcile deleted/rescheduled, and schedule
+    # nudge sequences: hourly with jitter (Phase 72-01)
     scheduler.add_job(
         sync_upcoming_calendar_nudges,
-        CronTrigger(hour=14, minute=0),
+        IntervalTrigger(minutes=60, jitter=60),
         id='calendar_nudge_sync',
-        name='Calendar Nudge Sync (daily 14:00 UTC)',
+        name='Calendar Nudge Sync (hourly)',
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=3600,
         coalesce=True,
     )
-    logger.info("Scheduler: Calendar nudge sync job registered (daily 14:00 UTC)")
+    logger.info("Scheduler: Calendar nudge sync job registered (hourly)")
 
     # Fire due calendar event nudges: every 10 minutes
     scheduler.add_job(

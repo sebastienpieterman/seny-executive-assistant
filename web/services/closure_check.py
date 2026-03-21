@@ -372,3 +372,210 @@ If you are unsure, respond with resolved=false. When in doubt, do not suppress t
             nudge['id'], e
         )
         return False
+
+
+# -- Lightweight DB-based closure checks (Phase 75-01) ----------------------
+
+
+def check_overdue_task_closure(nudge: dict, user_id: int) -> bool:
+    """
+    Check whether the task referenced by an overdue_task nudge has been completed.
+
+    Queries tasks.status via nudge['source_id'].
+    Returns True if status == 'completed', False otherwise.
+    Always fails open (returns False on error).
+    """
+    from web.core.database import get_db
+
+    source_id = nudge.get('source_id')
+    if not source_id:
+        logger.debug(
+            "[closure] nudge %d: overdue_task has no source_id -- sending",
+            nudge.get('id')
+        )
+        return False
+
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT status FROM tasks WHERE id = %s",
+                (source_id,)
+            )
+            row = cursor.fetchone()
+
+        if not row:
+            logger.debug(
+                "[closure] nudge %d: task %s not found -- sending",
+                nudge.get('id'), source_id
+            )
+            return False
+
+        status = row['status'] if isinstance(row, dict) else row[0]
+        if status == 'completed':
+            logger.info(
+                "[closure] nudge %d: task %s already completed -- closed",
+                nudge.get('id'), source_id
+            )
+            return True
+
+        return False
+
+    except Exception as e:
+        logger.warning(
+            "[closure] nudge %d: check_overdue_task_closure failed: %r -- sending",
+            nudge.get('id'), e
+        )
+        return False
+
+
+def check_nudge_followup_closure(nudge: dict, user_id: int) -> bool:
+    """
+    Check whether the original nudge referenced by a nudge_followup has been actioned.
+
+    Queries nudges.user_response and nudges.acted_at via nudge['source_id'].
+    Returns True if either is set (original nudge was responded to).
+    Always fails open (returns False on error).
+    """
+    from web.core.database import get_db
+
+    source_id = nudge.get('source_id')
+    if not source_id:
+        logger.debug(
+            "[closure] nudge %d: nudge_followup has no source_id -- sending",
+            nudge.get('id')
+        )
+        return False
+
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT user_response, acted_at FROM nudges WHERE id = %s",
+                (source_id,)
+            )
+            row = cursor.fetchone()
+
+        if not row:
+            logger.debug(
+                "[closure] nudge %d: source nudge %s not found -- sending",
+                nudge.get('id'), source_id
+            )
+            return False
+
+        user_response = row['user_response'] if isinstance(row, dict) else row[0]
+        acted_at = row['acted_at'] if isinstance(row, dict) else row[1]
+
+        if user_response or acted_at:
+            logger.info(
+                "[closure] nudge %d: source nudge %s already actioned "
+                "(response=%s, acted_at=%s) -- closed",
+                nudge.get('id'), source_id, user_response, acted_at
+            )
+            return True
+
+        return False
+
+    except Exception as e:
+        logger.warning(
+            "[closure] nudge %d: check_nudge_followup_closure failed: %r -- sending",
+            nudge.get('id'), e
+        )
+        return False
+
+
+def check_person_contact_closure(nudge: dict, user_id: int) -> bool:
+    """
+    Check whether outbound contact has been made with the person referenced
+    by a relationship_check or open_followup nudge.
+
+    Two-strategy name resolution:
+      a. If source_type='person' and source_id set -> look up people.name
+      b. Fallback: _extract_person_name_from_nudge() regex on title/body
+
+    Then searches scanned_items for direction='outbound' messages with
+    source_metadata ILIKE '%{name}%' after nudge created_at.
+
+    Returns True if outbound contact found, False otherwise.
+    Always fails open (returns False on error).
+    """
+    from web.core.database import get_db
+
+    nudge_id = nudge.get('id')
+
+    # -- Resolve person name --------------------------------------------------
+    person_name = None
+
+    # Strategy A: look up from people table if source_type='person'
+    source_type = nudge.get('source_type')
+    source_id = nudge.get('source_id')
+
+    if source_type == 'person' and source_id:
+        try:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT name FROM people WHERE id = %s",
+                    (source_id,)
+                )
+                row = cursor.fetchone()
+                if row:
+                    person_name = row['name'] if isinstance(row, dict) else row[0]
+        except Exception as e:
+            logger.debug(
+                "[closure] nudge %d: people lookup failed: %r -- trying regex",
+                nudge_id, e
+            )
+
+    # Strategy B: regex extraction from nudge text
+    if not person_name:
+        person_name = _extract_person_name_from_nudge(nudge)
+
+    if not person_name:
+        logger.debug(
+            "[closure] nudge %d: could not resolve person name -- sending",
+            nudge_id
+        )
+        return False
+
+    # -- Search for outbound contact after nudge creation ---------------------
+    created_at = nudge.get('created_at')
+    if not created_at:
+        logger.debug(
+            "[closure] nudge %d: no created_at -- sending",
+            nudge_id
+        )
+        return False
+
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id FROM scanned_items
+                WHERE user_id = %s
+                  AND direction = 'outbound'
+                  AND source_metadata ILIKE %s
+                  AND detected_at > %s
+                LIMIT 1
+            """, (user_id, f'%{person_name}%', created_at))
+            row = cursor.fetchone()
+
+        if row:
+            logger.info(
+                "[closure] nudge %d: outbound contact found for '%s' -- closed",
+                nudge_id, person_name
+            )
+            return True
+
+        logger.debug(
+            "[closure] nudge %d: no outbound contact for '%s' -- sending",
+            nudge_id, person_name
+        )
+        return False
+
+    except Exception as e:
+        logger.warning(
+            "[closure] nudge %d: check_person_contact_closure failed: %r -- sending",
+            nudge_id, e
+        )
+        return False
