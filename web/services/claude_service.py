@@ -5500,6 +5500,41 @@ content_json shapes:
                                 result_lines.append(f"(ID: {idea['id']})")
 
                                 tool_result = "\n".join(result_lines)
+
+                                # Check for similar existing ideas (non-blocking, never fails)
+                                try:
+                                    from web.services.embedding_service import get_embedding_service as _get_es
+                                    _es = _get_es()
+                                    if _es.enabled:
+                                        _query_text = title + " " + (summary or "")
+                                        _sr = _es.query_similar("ideas", int(user_id), _query_text, n_results=3)
+                                        sim_lines = []
+                                        for _r in _sr:
+                                            sr_dist = _r.get("distance")
+                                            if sr_dist is None or sr_dist > 1.2:
+                                                continue
+                                            try:
+                                                sr_id = int(_r["id"].split("_")[1])
+                                            except (IndexError, ValueError):
+                                                continue
+                                            # Skip self (won't be in ChromaDB yet, but guard anyway)
+                                            if sr_id == idea['id']:
+                                                continue
+                                            sr_score = max(0, 1 - (sr_dist ** 2) / 2)
+                                            sr_idea = None
+                                            try:
+                                                from web.core.database import get_idea as db_get_idea_fn
+                                                sr_idea = db_get_idea_fn(sr_id)
+                                            except Exception:
+                                                pass
+                                            sr_title = sr_idea.get("title", f"Idea #{sr_id}") if sr_idea else f"Idea #{sr_id}"
+                                            sim_lines.append(f'- "{sr_title}" (ID: {sr_id}, similarity: {sr_score:.0%})')
+                                        if sim_lines:
+                                            tool_result += "\n\nNote: Similar existing ideas found:\n" + "\n".join(sim_lines)
+                                            tool_result += "\nConsider mentioning these to the user — they may want to merge or review."
+                                except Exception:
+                                    pass  # Similar-ideas check must never break idea_capture
+
                             except Exception as e:
                                 print(f"[ERROR] idea_capture: {e}", flush=True)
                                 tool_result = f"Error capturing idea: {str(e)}"

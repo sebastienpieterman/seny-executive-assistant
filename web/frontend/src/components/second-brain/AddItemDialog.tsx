@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Dialog,
   DialogContent,
@@ -68,18 +68,39 @@ export function AddItemDialog({ open, initialCategory, onClose, onSubmit }: AddI
   const [category, setCategory] = useState<Category>(initialCategory || "people");
   const [formData, setFormData] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+  const [similarIdeas, setSimilarIdeas] = useState<Array<{id: number; title: string; summary: string; tags: string; similarity: number; match_type: string}>>([]);
+  const [checkingSimilar, setCheckingSimilar] = useState(false);
+  const debounceTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  const checkSimilar = async (text: string) => {
+    if (!text || text.length < 4) {
+      setSimilarIdeas([]);
+      return;
+    }
+    setCheckingSimilar(true);
+    try {
+      const data = await api.post<{similar: typeof similarIdeas}>("/api/second-brain/ideas/check-similar", { text });
+      setSimilarIdeas(data.similar || []);
+    } catch {
+      setSimilarIdeas([]);
+    } finally {
+      setCheckingSimilar(false);
+    }
+  };
 
   // Reset form when dialog opens
   useEffect(() => {
     if (open) {
       setCategory(initialCategory || "people");
       setFormData({});
+      setSimilarIdeas([]);
     }
   }, [open, initialCategory]);
 
   // Reset form data when category changes
   useEffect(() => {
     setFormData({});
+    setSimilarIdeas([]);
   }, [category]);
 
   const fields = getFields(category);
@@ -128,7 +149,7 @@ export function AddItemDialog({ open, initialCategory, onClose, onSubmit }: AddI
           </div>
 
           {/* Dynamic fields based on category */}
-          {fields.map((f) => (
+          {fields.map((f, idx) => (
             <div key={f.key}>
               <Label className="mb-1.5 block text-xs text-muted-foreground">
                 {f.label}{f.required && <span className="text-red-400 ml-1">*</span>}
@@ -143,9 +164,38 @@ export function AddItemDialog({ open, initialCategory, onClose, onSubmit }: AddI
               ) : (
                 <Input
                   value={formData[f.key] || ""}
-                  onChange={(e) => setFormData((d) => ({ ...d, [f.key]: e.target.value }))}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setFormData((d) => ({ ...d, [f.key]: value }));
+                    // Debounced similar-ideas check for idea title field
+                    if (category === "ideas" && f.key === "name") {
+                      clearTimeout(debounceTimer.current);
+                      debounceTimer.current = setTimeout(() => checkSimilar(value), 500);
+                    }
+                  }}
                   placeholder={f.placeholder}
                 />
+              )}
+              {/* Similar ideas preview — shown after the title field for ideas */}
+              {category === "ideas" && f.key === "name" && idx === 0 && (
+                <>
+                  {checkingSimilar && (
+                    <p className="mt-2 text-xs text-muted-foreground">Checking for similar ideas...</p>
+                  )}
+                  {!checkingSimilar && similarIdeas.length > 0 && (
+                    <div className="mt-2 rounded-md border border-yellow-500/30 bg-yellow-500/5 p-3 space-y-2">
+                      <p className="text-xs font-medium text-yellow-400">Similar existing ideas:</p>
+                      {similarIdeas.map((idea) => (
+                        <div key={idea.id} className="text-xs text-muted-foreground">
+                          <span className="font-medium text-foreground">{idea.title}</span>
+                          {idea.summary && <span> — {idea.summary.slice(0, 80)}</span>}
+                          <span className="ml-2 text-yellow-400/70">{Math.round(idea.similarity * 100)}% similar</span>
+                        </div>
+                      ))}
+                      <p className="text-[10px] text-muted-foreground/60">You can still create this idea — these are just suggestions.</p>
+                    </div>
+                  )}
+                </>
               )}
             </div>
           ))}

@@ -676,3 +676,70 @@ async def dismiss_duplicates(
             dismissed_count += 1
 
     return {"success": True, "pairs_dismissed": dismissed_count}
+
+
+# ============================================================================
+# Ideas Similarity Suggestion (Phase 81)
+# ============================================================================
+
+
+@router.post("/ideas/check-similar")
+async def check_similar_ideas(
+    request: dict,
+    user_id: int = Depends(require_auth),
+):
+    """Check for semantically similar existing ideas before creation.
+
+    Advisory endpoint — never fails. Returns {"similar": []} on any error.
+    """
+    try:
+        text = (request.get("text") or "").strip()
+        if not text:
+            return {"similar": []}
+
+        similar = []
+
+        # Try ChromaDB semantic search first
+        from web.services.embedding_service import get_embedding_service
+        svc = get_embedding_service()
+
+        if svc.enabled:
+            results = svc.query_similar("ideas", int(user_id), text, n_results=5)
+            for r in results:
+                distance = r.get("distance")
+                if distance is None or distance > 1.2:
+                    continue
+                # Extract numeric ID from "idea_{id}" format
+                try:
+                    idea_id = int(r["id"].split("_")[1])
+                except (IndexError, ValueError):
+                    continue
+                idea = get_idea(idea_id)
+                if not idea:
+                    continue
+                similarity = max(0, 1 - (distance ** 2) / 2)
+                similar.append({
+                    "id": idea["id"],
+                    "title": idea.get("title", ""),
+                    "summary": idea.get("summary", ""),
+                    "tags": idea.get("tags", ""),
+                    "similarity": round(similarity, 3),
+                    "match_type": "semantic",
+                })
+        else:
+            # FTS fallback when embeddings disabled
+            results = search_ideas(int(user_id), text, limit=5)
+            for r in results:
+                similar.append({
+                    "id": r["id"],
+                    "title": r.get("title", ""),
+                    "summary": r.get("summary", ""),
+                    "tags": r.get("tags", ""),
+                    "similarity": 0.5,
+                    "match_type": "text",
+                })
+
+        return {"similar": similar}
+    except Exception as e:
+        logger.warning(f"check_similar_ideas error (non-fatal): {repr(e)}")
+        return {"similar": []}
