@@ -57,7 +57,6 @@ TABLES_IN_ORDER = [
     ("people_followups", "id"),
     ("projects", "id"),
     ("ideas", "id"),
-    ("admin_items", "id"),
     # Tier 5
     ("nudges", "id"),
     ("scanned_items", "id"),

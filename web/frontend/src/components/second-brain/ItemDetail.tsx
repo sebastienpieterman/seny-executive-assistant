@@ -26,7 +26,6 @@ const CATEGORY_COLORS: Record<string, string> = {
   people: "bg-blue-500/20 text-blue-400 border-blue-500/30",
   projects: "bg-green-500/20 text-green-400 border-green-500/30",
   ideas: "bg-purple-500/20 text-purple-400 border-purple-500/30",
-  admin: "bg-orange-500/20 text-orange-400 border-orange-500/30",
 };
 
 interface ActivityItem {
@@ -88,13 +87,6 @@ function getFields(category: string): FieldDef[] {
         { key: "summary", label: "Summary", type: "text" },
         { key: "notes", label: "Notes", type: "textarea" },
         { key: "tags", label: "Tags", type: "text" },
-      ];
-    case "admin":
-      return [
-        { key: "title", label: "Title", type: "text" },
-        { key: "status", label: "Status", type: "text" },
-        { key: "due_date", label: "Due Date", type: "text" },
-        { key: "notes", label: "Notes", type: "textarea" },
       ];
     default:
       return [];

@@ -1,6 +1,6 @@
 import { cn } from "@/lib/utils";
 
-export type Category = "" | "people" | "projects" | "ideas" | "admin" | "activity" | "captures" | "search";
+export type Category = "" | "people" | "projects" | "ideas" | "activity" | "captures" | "search";
 
 interface CategoryTabsProps {
   active: Category;
@@ -13,14 +13,13 @@ const TABS: { value: Category; label: string }[] = [
   { value: "people", label: "People" },
   { value: "projects", label: "Projects" },
   { value: "ideas", label: "Ideas" },
-  { value: "admin", label: "Admin" },
   { value: "activity", label: "Activity" },
   { value: "captures", label: "Captures" },
   { value: "search", label: "Search" },
 ];
 
 export function CategoryTabs({ active, counts, onSelect }: CategoryTabsProps) {
-  const total = (counts.people || 0) + (counts.projects || 0) + (counts.ideas || 0) + (counts.admin || 0);
+  const total = (counts.people || 0) + (counts.projects || 0) + (counts.ideas || 0);
 
   return (
     <div className="flex flex-wrap gap-1 border-b border-border px-3 py-2">

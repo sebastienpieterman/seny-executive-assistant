@@ -1,7 +1,7 @@
 """
 Second Brain Management API endpoints for Seny.
 
-Provides a unified view across all Second Brain categories (People, Projects, Ideas, Admin).
+Provides a unified view across all Second Brain categories (People, Projects, Ideas).
 - GET /api/second-brain/stats - Category counts
 - GET /api/second-brain/items - List all items across categories
 - GET /api/second-brain/items/{category}/{item_id} - Get item detail
@@ -23,8 +23,7 @@ from web.core.database import (
     get_people_by_user, get_person, update_person, delete_person, search_people,
     get_projects_by_user, get_project, update_project, delete_project, search_projects,
     get_ideas_by_user, get_idea, update_idea, delete_idea, search_ideas,
-    get_admin_items_by_user, get_admin_item, update_admin_item, search_admin_items,
-    create_person, create_project, create_idea, create_admin_item,
+    create_person, create_project, create_idea,
     get_person_followups, get_recent_inbox,
     merge_people, merge_ideas,
     find_duplicate_people, find_duplicate_ideas,
@@ -61,7 +60,6 @@ class StatsResponse(BaseModel):
     people: int
     projects: int
     ideas: int
-    admin: int
     total: int
 
 
@@ -73,7 +71,6 @@ class ItemUpdate(BaseModel):
     next_action: Optional[str] = None
     summary: Optional[str] = None
     tags: Optional[str] = None
-    due_date: Optional[str] = None
     status: Optional[str] = None
     relationship_type: Optional[str] = None
 
@@ -93,7 +90,6 @@ class CreateItemRequest(BaseModel):
     status: Optional[str] = None  # Projects
     summary: Optional[str] = None  # Ideas
     tags: Optional[str] = None  # Ideas
-    due_date: Optional[str] = None  # Admin
     relationship_type: Optional[str] = None  # People
 
 
@@ -157,19 +153,6 @@ def _idea_to_item(p: dict, inbox: dict = None) -> SecondBrainItem:
     )
 
 
-def _admin_to_item(p: dict, inbox: dict = None) -> SecondBrainItem:
-    return SecondBrainItem(
-        id=p["id"],
-        category="admin",
-        name=p.get("title") or "",
-        subtitle=p.get("status") or "",
-        created_at=p.get("created_at") or "",
-        updated_at=p.get("updated_at") or p.get("completed_at") or "",
-        confidence=inbox.get("confidence") if inbox else None,
-        original_text=inbox.get("original_text") if inbox else None,
-    )
-
-
 # --- Endpoints ---
 
 @router.get("/stats", response_model=StatsResponse)
@@ -179,20 +162,18 @@ async def get_stats(user_id: str = Depends(require_auth)):
     people = get_people_by_user(uid)
     projects = get_projects_by_user(uid)
     ideas = get_ideas_by_user(uid)
-    admin = get_admin_items_by_user(uid)
     return StatsResponse(
         people=len(people),
         projects=len(projects),
         ideas=len(ideas),
-        admin=len(admin),
-        total=len(people) + len(projects) + len(ideas) + len(admin),
+        total=len(people) + len(projects) + len(ideas),
     )
 
 
 @router.get("/items", response_model=SecondBrainListResponse)
 async def list_items(
     user_id: str = Depends(require_auth),
-    category: Optional[str] = Query(None, description="Filter by category: people, projects, ideas, admin"),
+    category: Optional[str] = Query(None, description="Filter by category: people, projects, ideas"),
     search: Optional[str] = Query(None, description="Search query"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -201,7 +182,7 @@ async def list_items(
     uid = int(user_id)
     all_items: list[SecondBrainItem] = []
 
-    categories = [category] if category else ["people", "projects", "ideas", "admin"]
+    categories = [category] if category else ["people", "projects", "ideas"]
 
     for cat in categories:
         try:
@@ -232,14 +213,6 @@ async def list_items(
                     inbox = _get_inbox_info_for_item(uid, "ideas", r["id"])
                     all_items.append(_idea_to_item(r, inbox))
 
-            elif cat == "admin":
-                if search:
-                    rows = search_admin_items(uid, search)
-                else:
-                    rows = get_admin_items_by_user(uid)
-                for r in rows:
-                    inbox = _get_inbox_info_for_item(uid, "admin_items", r["id"])
-                    all_items.append(_admin_to_item(r, inbox))
         except Exception as e:
             import traceback
             print(f"Error loading {cat} items: {e}")
@@ -273,8 +246,6 @@ async def get_item_detail(
         item = get_project(item_id)
     elif category == "ideas":
         item = get_idea(item_id)
-    elif category == "admin":
-        item = get_admin_item(item_id)
     else:
         raise HTTPException(status_code=400, detail=f"Invalid category: {category}")
 
@@ -286,7 +257,7 @@ async def get_item_detail(
         raise HTTPException(status_code=404, detail="Item not found")
 
     # Add inbox info
-    table_name = "admin_items" if category == "admin" else category
+    table_name = category
     inbox = _get_inbox_info_for_item(uid, table_name, item_id)
     item["confidence"] = inbox.get("confidence")
     item["original_text"] = inbox.get("original_text")
@@ -313,8 +284,6 @@ async def update_item(
         item = get_project(item_id)
     elif category == "ideas":
         item = get_idea(item_id)
-    elif category == "admin":
-        item = get_admin_item(item_id)
     else:
         raise HTTPException(status_code=400, detail=f"Invalid category: {category}")
 
@@ -359,18 +328,6 @@ async def update_item(
         if fields:
             update_idea(item_id, **fields)
 
-    elif category == "admin":
-        if update.name is not None:
-            fields["title"] = update.name
-        if update.notes is not None:
-            fields["notes"] = update.notes
-        if update.due_date is not None:
-            fields["due_date"] = update.due_date
-        if update.status is not None:
-            fields["status"] = update.status
-        if fields:
-            update_admin_item(item_id, **fields)
-
     return {"status": "updated", "category": category, "id": item_id}
 
 
@@ -391,8 +348,6 @@ async def delete_item(
         item = get_project(item_id)
     elif category == "ideas":
         item = get_idea(item_id)
-    elif category == "admin":
-        item = get_admin_item(item_id)
     else:
         raise HTTPException(status_code=400, detail=f"Invalid category: {category}")
 
@@ -406,17 +361,9 @@ async def delete_item(
         delete_project(item_id)
     elif category == "ideas":
         delete_idea(item_id)
-    elif category == "admin":
-        # delete_admin_item may not exist, use direct delete
-        try:
-            with get_db() as conn:
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM admin_items WHERE id = %s", (item_id,))
-        except Exception:
-            pass
 
     # Also clean up inbox_log
-    table_name = "admin_items" if category == "admin" else category
+    table_name = category
     try:
         with get_db() as conn:
             cursor = conn.cursor()
@@ -439,14 +386,14 @@ async def create_item(
     """Create a new Second Brain item."""
     uid = int(user_id)
     
-    if category not in ("people", "projects", "ideas", "admin"):
+    if category not in ("people", "projects", "ideas"):
         raise HTTPException(status_code=400, detail=f"Invalid category: {category}")
-    
+
     if not request.name or not request.name.strip():
         raise HTTPException(status_code=400, detail="Name is required")
-    
+
     new_id = None
-    
+
     if category == "people":
         new_id = create_person(
             user_id=uid,
@@ -472,13 +419,6 @@ async def create_item(
             notes=request.notes,
             tags=request.tags,
         )
-    elif category == "admin":
-        new_id = create_admin_item(
-            user_id=uid,
-            title=request.name.strip(),
-            notes=request.notes,
-            due_date=request.due_date,
-        )
     
     if not new_id:
         raise HTTPException(status_code=500, detail="Failed to create item")
@@ -497,7 +437,7 @@ async def reclassify_item(
     uid = int(user_id)
     target = request.target_category
 
-    if target not in ("people", "projects", "ideas", "admin"):
+    if target not in ("people", "projects", "ideas"):
         raise HTTPException(status_code=400, detail=f"Invalid target category: {target}")
 
     if target == category:
@@ -511,8 +451,6 @@ async def reclassify_item(
         old_data = get_project(item_id) or {}
     elif category == "ideas":
         old_data = get_idea(item_id) or {}
-    elif category == "admin":
-        old_data = get_admin_item(item_id) or {}
     else:
         raise HTTPException(status_code=400, detail=f"Invalid source category: {category}")
 
@@ -549,14 +487,6 @@ async def reclassify_item(
             notes=old_data.get("notes"),
             tags=old_data.get("tags"),
         )
-    elif target == "admin":
-        new_table = "admin_items"
-        new_id = create_admin_item(
-            user_id=uid,
-            title=name,
-            notes=old_data.get("notes") or old_data.get("summary"),
-            due_date=old_data.get("due_date"),
-        )
 
     # Delete from old category
     if category == "people":
@@ -565,16 +495,9 @@ async def reclassify_item(
         delete_project(item_id)
     elif category == "ideas":
         delete_idea(item_id)
-    elif category == "admin":
-        try:
-            with get_db() as conn:
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM admin_items WHERE id = %s", (item_id,))
-        except Exception:
-            pass
 
     # Update inbox_log
-    old_table = "admin_items" if category == "admin" else category
+    old_table = category
     try:
         with get_db() as conn:
             cursor = conn.cursor()
@@ -604,7 +527,6 @@ def _enrich_captures_with_names(entries: list[dict]) -> list[dict]:
       people       → name
       projects     → name
       ideas        → title
-      admin_items  → title
     """
     # Group entry indices by table so we do one query per table
     by_table: dict[str, list[int]] = {}
@@ -613,9 +535,9 @@ def _enrich_captures_with_names(entries: list[dict]) -> list[dict]:
         if table and e.get("routed_to_id") is not None:
             by_table.setdefault(table, []).append(i)
 
-    name_col = {"people": "name", "projects": "name", "ideas": "title", "admin_items": "title"}
+    name_col = {"people": "name", "projects": "name", "ideas": "title"}
     # frontend category slug used for click-through navigation
-    category_slug = {"people": "people", "projects": "projects", "ideas": "ideas", "admin_items": "admin"}
+    category_slug = {"people": "people", "projects": "projects", "ideas": "ideas"}
 
     with get_db() as conn:
         cursor = conn.cursor()

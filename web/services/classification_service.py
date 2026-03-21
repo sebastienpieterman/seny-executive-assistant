@@ -5,7 +5,6 @@ Uses Claude Haiku for fast, cheap classification of user messages into:
 - people: Relationship info (person with context/follow-up)
 - project: Work with next actions
 - idea: Insight/thought worth capturing
-- admin: Errand/todo item
 - none: Just conversation, no capture needed
 """
 
@@ -20,12 +19,10 @@ from web.core.database import (
     create_project,
     # Ideas CRUD
     create_idea,
-    # Admin CRUD (now routes to tasks with type='errand')
     # Inbox log
     log_inbox_entry, get_recent_inbox
 )
 from web.services.people_service import PeopleService
-from web.services.tasks_service import TasksService
 from src.core.config import Config
 
 logger = logging.getLogger(__name__)
@@ -37,20 +34,18 @@ Classifications:
 - **people**: Information about a specific person - who they are, how you know them, things to remember about them, follow-ups to do with them. Examples: "Sarah from work mentioned she's moving to Austin", "Remind me to ask John about the project", "Had coffee with Mike, he's interested in investing"
 - **project**: Work/project with status or next actions. Examples: "Need to finish the website redesign - next step is wireframes", "The marketing campaign is blocked waiting on assets", "Started learning Spanish, should practice 20 min daily"
 - **idea**: An insight, thought, or idea worth capturing. Examples: "I think we should try a subscription model", "What if we combined X with Y?", "Interesting observation: people prefer..."
-- **admin**: Errand, todo, or life admin task. Examples: "Need to renew my passport", "Buy groceries this weekend", "Schedule dentist appointment", "Pay electric bill"
 - **none**: Just conversation - questions, chitchat, commands to the assistant, or anything that doesn't fit above. Examples: "What's the weather?", "Tell me a joke", "How do I use this feature?", "Thanks!"
 
 For each classification except 'none', extract relevant structured data.
 
 Respond with ONLY valid JSON in this exact format:
 {
-  "classification": "people|project|idea|admin|none",
+  "classification": "people|project|idea|none",
   "confidence": 0.0-1.0,
   "extracted": {
     // For people: {"name": "...", "context": "...", "notes": "...", "followup": "..." (if any)}
     // For project: {"name": "...", "next_action": "...", "notes": "..."}
     // For idea: {"title": "...", "summary": "...", "tags": "..."}
-    // For admin: {"title": "...", "notes": "...", "due_date": "..." (if mentioned, ISO format)}
     // For none: {}
   },
   "reasoning": "Brief explanation of classification"
@@ -95,7 +90,7 @@ class ClassificationService:
 
         Returns:
             dict: {
-                'classification': 'people' | 'project' | 'idea' | 'admin' | 'none',
+                'classification': 'people' | 'project' | 'idea' | 'none',
                 'confidence': 0.0-1.0,
                 'extracted': { ... extracted fields ... },
                 'routed_to_table': str or None,
@@ -197,10 +192,6 @@ class ClassificationService:
                 await self._route_to_project(result, extracted)
             elif classification == 'idea':
                 await self._route_to_idea(result, extracted)
-            elif classification == 'admin':
-                # Skip auto-routing for admin - Claude handles errands directly via task_create
-                # This prevents duplicates since user's errand requests go to Claude first
-                result['action_taken'] = 'Admin/errand skipped - Claude handles directly via task_create'
         except Exception as e:
             logger.error(f"Routing error for {classification}: {e}")
             result['action_taken'] = f'Routing error: {str(e)}'
@@ -333,37 +324,6 @@ class ClassificationService:
             result['routed_to_table'] = 'ideas'
             result['routed_to_id'] = idea_id
             result['action_taken'] = f"Captured idea: {title}"
-
-    async def _route_to_admin(self, result: dict, extracted: dict) -> None:
-        """Route to tasks table with type='errand'."""
-        title = extracted.get('title', '').strip()
-        if not title:
-            result['action_taken'] = 'No admin item title extracted, skipping routing'
-            return
-
-        # Create task with type='errand' instead of admin_item
-        tasks_service = TasksService(self.user_id)
-
-        # Parse due_date if provided
-        due_date = None
-        due_date_str = extracted.get('due_date')
-        if due_date_str:
-            try:
-                from datetime import datetime
-                due_date = datetime.fromisoformat(due_date_str.replace('Z', '+00:00'))
-            except (ValueError, TypeError):
-                pass
-
-        task = await tasks_service.create_task(
-            title=title,
-            description=extracted.get('notes'),
-            task_type='errand',
-            due_date=due_date
-        )
-        if task:
-            result['routed_to_table'] = 'tasks'
-            result['routed_to_id'] = task['id']
-            result['action_taken'] = f"Created errand: {title}"
 
     @staticmethod
     def should_skip_classification(text: str) -> bool:

@@ -931,7 +931,7 @@ This corrects automatic classification mistakes. The item will be removed from i
                                 },
                                 'new_classification': {
                                     'type': 'string',
-                                    'enum': ['people', 'project', 'idea', 'admin'],
+                                    'enum': ['people', 'project', 'idea'],
                                     'description': 'The correct category for this item'
                                 },
                                 'reason': {
@@ -4480,8 +4480,8 @@ content_json shapes:
                         # Reclassify a captured item
                         from web.core.database import (
                             get_db, get_person, delete_person, get_project, delete_project,
-                            get_idea, delete_idea, get_admin_item, create_person,
-                            create_project, create_idea, create_admin_item
+                            get_idea, delete_idea, create_person,
+                            create_project, create_idea
                         )
                         inbox_id = tool_use_block.input.get('inbox_id')
                         new_classification = tool_use_block.input.get('new_classification')
@@ -4490,7 +4490,7 @@ content_json shapes:
                         if not inbox_id:
                             tool_result = "inbox_id is required. Use inbox_recent to see capture IDs."
                         elif not new_classification:
-                            tool_result = "new_classification is required. Options: people, project, idea, admin"
+                            tool_result = "new_classification is required. Options: people, project, idea"
                         else:
                             # Get the inbox entry
                             with get_db() as conn:
@@ -4517,8 +4517,6 @@ content_json shapes:
                                         old_data = get_project(old_id) or {}
                                     elif old_table == 'ideas':
                                         old_data = get_idea(old_id) or {}
-                                    elif old_table == 'admin_items':
-                                        old_data = get_admin_item(old_id) or {}
 
                                     # Delete from old table
                                     if old_table == 'people':
@@ -4527,12 +4525,6 @@ content_json shapes:
                                         delete_project(old_id)
                                     elif old_table == 'ideas':
                                         delete_idea(old_id)
-                                    elif old_table == 'admin_items':
-                                        from web.core.database import update_admin_item
-                                        # For admin, just mark as done to preserve history
-                                        with get_db() as conn:
-                                            cursor = conn.cursor()
-                                            cursor.execute("DELETE FROM admin_items WHERE id = %s", (old_id,))
 
                                 # Create in new table
                                 new_id = None
@@ -4565,15 +4557,6 @@ content_json shapes:
                                         summary=old_data.get('summary') or old_data.get('context'),
                                         notes=old_data.get('notes'),
                                         tags=old_data.get('tags')
-                                    )
-                                elif new_classification == 'admin':
-                                    new_table = 'admin_items'
-                                    title = old_data.get('title') or old_data.get('name') or original_text[:50]
-                                    new_id = create_admin_item(
-                                        user_id=user_id,
-                                        title=title,
-                                        notes=old_data.get('notes') or old_data.get('summary'),
-                                        due_date=old_data.get('due_date')
                                     )
 
                                 # Update inbox_log with new routing
@@ -4626,11 +4609,6 @@ content_json shapes:
                                         deleted_from_table = delete_project(routed_id)
                                     elif routed_table == 'ideas':
                                         deleted_from_table = delete_idea(routed_id)
-                                    elif routed_table == 'admin_items':
-                                        with get_db() as conn:
-                                            cursor = conn.cursor()
-                                            cursor.execute("DELETE FROM admin_items WHERE id = %s", (routed_id,))
-                                            deleted_from_table = cursor.rowcount > 0
 
                                 # Delete the inbox log entry
                                 with get_db() as conn:

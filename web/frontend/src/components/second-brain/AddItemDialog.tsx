@@ -19,7 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-export type Category = "people" | "projects" | "ideas" | "admin";
+export type Category = "people" | "projects" | "ideas";
 
 interface FieldDef {
   key: string;
@@ -51,12 +51,6 @@ function getFields(category: Category): FieldDef[] {
         { key: "summary", label: "Summary", type: "text", placeholder: "One-line summary" },
         { key: "notes", label: "Notes", type: "textarea", placeholder: "Elaborate on the idea..." },
         { key: "tags", label: "Tags", type: "text", placeholder: "e.g., business, tech, personal" },
-      ];
-    case "admin":
-      return [
-        { key: "name", label: "Title", type: "text", placeholder: "Task or errand title", required: true },
-        { key: "due_date", label: "Due Date", type: "text", placeholder: "e.g., 2026-02-20" },
-        { key: "notes", label: "Notes", type: "textarea", placeholder: "Details..." },
       ];
     default:
       return [];
@@ -129,7 +123,6 @@ export function AddItemDialog({ open, initialCategory, onClose, onSubmit }: AddI
                 <SelectItem value="people">People</SelectItem>
                 <SelectItem value="projects">Projects</SelectItem>
                 <SelectItem value="ideas">Ideas</SelectItem>
-                <SelectItem value="admin">Admin/Tasks</SelectItem>
               </SelectContent>
             </Select>
           </div>

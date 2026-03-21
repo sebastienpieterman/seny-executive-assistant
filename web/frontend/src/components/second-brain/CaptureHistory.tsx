@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
 import { formatDistanceToNow } from "date-fns";
-import { Trash2, Users, FolderOpen, Lightbulb, CheckSquare, Eye, EyeOff } from "lucide-react";
+import { Trash2, Users, FolderOpen, Lightbulb, Eye, EyeOff } from "lucide-react";
 
 interface CaptureEntry {
   id: number;
@@ -31,7 +31,6 @@ const CATEGORY_CONFIG: Record<string, { label: string; icon: React.ReactNode; co
   people:  { label: "People",  icon: <Users className="h-3 w-3" />,       color: "bg-blue-500/15 text-blue-400 border-blue-500/30" },
   project: { label: "Project", icon: <FolderOpen className="h-3 w-3" />,  color: "bg-purple-500/15 text-purple-400 border-purple-500/30" },
   idea:    { label: "Idea",    icon: <Lightbulb className="h-3 w-3" />,   color: "bg-yellow-500/15 text-yellow-400 border-yellow-500/30" },
-  admin:   { label: "Admin",   icon: <CheckSquare className="h-3 w-3" />, color: "bg-green-500/15 text-green-400 border-green-500/30" },
   none:    { label: "Ignored", icon: null,                                  color: "bg-muted/50 text-muted-foreground border-border" },
 };
 

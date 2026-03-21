@@ -259,38 +259,18 @@ def init_db() -> None:
                     and "no such table" not in str(e).lower():
                 raise
 
-        # Migration: Move admin_items to tasks table (one-time migration)
-        # Only runs if admin_items table exists and has items not yet migrated
+        # Migration: Clean up orphaned inbox_log entries that reference deleted admin_items table (Phase 80)
         try:
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='admin_items'")
-            if cursor.fetchone():
-                # Check if any admin items need migration (not already in tasks)
-                cursor.execute("""
-                    SELECT COUNT(*) FROM admin_items ai
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM tasks t
-                        WHERE t.user_id = ai.user_id
-                        AND t.title = ai.title
-                        AND t.type = 'errand'
-                    )
-                """)
-                unmigrated_count = cursor.fetchone()[0]
-
-                if unmigrated_count > 0:
-                    cursor.execute("""
-                        INSERT INTO tasks (user_id, title, description, status, due_date, completed_at, created_at, type)
-                        SELECT user_id, title, notes, status, due_date, completed_at, created_at, 'errand'
-                        FROM admin_items ai
-                        WHERE NOT EXISTS (
-                            SELECT 1 FROM tasks t
-                            WHERE t.user_id = ai.user_id
-                            AND t.title = ai.title
-                            AND t.type = 'errand'
-                        )
-                    """)
-                    print(f"[INIT_DB] Migrated {unmigrated_count} admin_items to tasks as errands")
-        except Exception as e:
-            print(f"[INIT_DB] Admin items migration skipped: {e}")
+            cursor.execute("""
+                UPDATE inbox_log
+                SET routed_to_table = NULL, routed_to_id = NULL
+                WHERE routed_to_table = 'admin_items'
+            """)
+            updated = cursor.rowcount
+            if updated:
+                print(f"[INIT_DB] Cleared {updated} orphaned inbox_log entries referencing admin_items")
+        except Exception:
+            pass
 
         # Migration: Add digest preferences columns to user_settings
         # These control the daily digest feature
@@ -2091,36 +2071,6 @@ def init_db() -> None:
         """)
 
         # ============================================================================
-        # Second Brain - Admin Items Database
-        # ============================================================================
-
-        # Create admin_items table - errands and life admin
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS admin_items (
-                id BIGSERIAL PRIMARY KEY,
-                user_id INTEGER NOT NULL,
-                title TEXT NOT NULL,
-                notes TEXT,
-                due_date TEXT,
-                status TEXT DEFAULT 'pending',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                completed_at TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-            )
-        """)
-
-        # Create indexes for admin_items
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_admin_items_user_id ON admin_items(user_id)
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_admin_items_user_status ON admin_items(user_id, status)
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_admin_items_due ON admin_items(user_id, due_date)
-        """)
-
-        # ============================================================================
         # Second Brain - Inbox Log (Audit Trail)
         # ============================================================================
 
@@ -2859,7 +2809,6 @@ def init_db() -> None:
                 "CREATE INDEX IF NOT EXISTS idx_people_name_trgm ON people USING GIN (name gin_trgm_ops)",
                 "CREATE INDEX IF NOT EXISTS idx_projects_name_trgm ON projects USING GIN (name gin_trgm_ops)",
                 "CREATE INDEX IF NOT EXISTS idx_ideas_title_trgm ON ideas USING GIN (title gin_trgm_ops)",
-                "CREATE INDEX IF NOT EXISTS idx_admin_items_title_trgm ON admin_items USING GIN (title gin_trgm_ops)",
                 "CREATE INDEX IF NOT EXISTS idx_google_contacts_name_trgm ON google_contacts USING GIN (display_name gin_trgm_ops)",
                 "CREATE INDEX IF NOT EXISTS idx_drive_files_name_trgm ON drive_files USING GIN (name gin_trgm_ops)",
             ]
@@ -7140,198 +7089,6 @@ def search_ideas(user_id: int, query: str, limit: int = 20) -> list[dict]:
             for row in rows:
                 row_dict = dict(row)
                 snippet_text = row_dict.get('title') or row_dict.get('summary') or ''
-                row_dict['snippet'] = extract_snippet(snippet_text, original_query)
-                results.append(row_dict)
-            return results
-        except Exception:
-            return []
-
-
-# ============================================================================
-# Second Brain - Admin Items CRUD Functions
-# ============================================================================
-
-def create_admin_item(
-    user_id: int,
-    title: str,
-    notes: str = None,
-    due_date: str = None
-) -> Optional[int]:
-    """
-    Create a new admin item in the Second Brain admin database.
-
-    Args:
-        user_id: User's unique identifier
-        title: Admin item title
-        notes: Additional notes
-        due_date: Optional due date (ISO format)
-
-    Returns:
-        Admin item ID if successful, None on error
-    """
-    try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO admin_items (user_id, title, notes, due_date)
-                VALUES (%s, %s, %s, %s)
-                RETURNING id
-            """, (user_id, title, notes, due_date))
-            row = cursor.fetchone()
-
-            return row['id'] if row else None
-    except Exception as e:
-        return None
-
-
-def get_admin_item(item_id: int) -> Optional[dict]:
-    """
-    Get an admin item by ID.
-
-    Args:
-        item_id: Admin item's unique identifier
-
-    Returns:
-        Admin item dictionary or None if not found
-    """
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, user_id, title, notes, due_date, status,
-                   created_at, completed_at
-            FROM admin_items WHERE id = %s
-        """, (item_id,))
-        row = cursor.fetchone()
-        if not row:
-            return None
-        return dict(row)
-
-
-def get_admin_items_by_user(
-    user_id: int,
-    status: str = None,
-    limit: int = 100
-) -> list[dict]:
-    """
-    Get all admin items for a user.
-
-    Args:
-        user_id: User's unique identifier
-        status: Optional status filter ('pending' or 'done')
-        limit: Maximum results to return
-
-    Returns:
-        List of admin item dictionaries
-    """
-    with get_db() as conn:
-        cursor = conn.cursor()
-        if status:
-            cursor.execute("""
-                SELECT id, user_id, title, notes, due_date, status,
-                       created_at, completed_at
-                FROM admin_items
-                WHERE user_id = %s AND status = %s
-                ORDER BY COALESCE(due_date, '9999-12-31') ASC, created_at DESC
-                LIMIT %s
-            """, (user_id, status, limit))
-        else:
-            cursor.execute("""
-                SELECT id, user_id, title, notes, due_date, status,
-                       created_at, completed_at
-                FROM admin_items
-                WHERE user_id = %s
-                ORDER BY COALESCE(due_date, '9999-12-31') ASC, created_at DESC
-                LIMIT %s
-            """, (user_id, limit))
-        return [dict(row) for row in cursor.fetchall()]
-
-
-def update_admin_item(item_id: int, **fields) -> bool:
-    """
-    Update an admin item's fields.
-
-    Args:
-        item_id: Admin item's unique identifier
-        **fields: Fields to update (title, notes, due_date, status)
-
-    Returns:
-        True if updated, False otherwise
-    """
-    if not fields:
-        return False
-
-    allowed_fields = {'title', 'notes', 'due_date', 'status'}
-    update_fields = {k: v for k, v in fields.items() if k in allowed_fields}
-
-    if not update_fields:
-        return False
-
-    set_clause = ', '.join(f'{k} = %s' for k in update_fields.keys())
-    values = list(update_fields.values()) + [item_id]
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(f"""
-            UPDATE admin_items SET {set_clause} WHERE id = %s
-        """, values)
-        return cursor.rowcount > 0
-
-
-def complete_admin_item(item_id: int) -> bool:
-    """
-    Mark an admin item as done.
-
-    Args:
-        item_id: Admin item's unique identifier
-
-    Returns:
-        True if updated, False otherwise
-    """
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE admin_items
-            SET status = 'done', completed_at = CURRENT_TIMESTAMP
-            WHERE id = %s
-        """, (item_id,))
-        return cursor.rowcount > 0
-
-
-def search_admin_items(user_id: int, query: str, limit: int = 20) -> list[dict]:
-    """
-    Search admin items using FTS5 full-text search.
-
-    Args:
-        user_id: User's unique identifier
-        query: Search query
-        limit: Maximum results to return
-
-    Returns:
-        List of matching admin item dictionaries
-    """
-    if not query or not query.strip():
-        return []
-
-    original_query = query.strip()
-    search_pattern = f'%{original_query}%'
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                SELECT DISTINCT a.id, a.user_id, a.title, a.notes,
-                       a.due_date, a.status, a.created_at, a.completed_at
-                FROM admin_items a
-                WHERE a.title ILIKE %s
-                AND a.user_id = %s
-                ORDER BY COALESCE(a.due_date::text, '9999-12-31') ASC
-                LIMIT %s
-            """, (search_pattern, user_id, limit))
-            rows = cursor.fetchall()
-            results = []
-            for row in rows:
-                row_dict = dict(row)
-                snippet_text = row_dict.get('title') or ''
                 row_dict['snippet'] = extract_snippet(snippet_text, original_query)
                 results.append(row_dict)
             return results

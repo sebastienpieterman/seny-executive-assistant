@@ -21,7 +21,6 @@ const CATEGORIES = [
   { value: "people", label: "People" },
   { value: "projects", label: "Projects" },
   { value: "ideas", label: "Ideas" },
-  { value: "admin", label: "Admin" },
 ];
 
 interface ReclassifyDialogProps {
