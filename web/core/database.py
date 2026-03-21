@@ -8344,6 +8344,32 @@ def resolve_entity(user_id: int, source: str, source_identifier: str) -> Optiona
         return dict(row)
 
 
+def update_entity_mapping_person(mapping_id: int, person_id: int, confidence: float) -> bool:
+    """
+    Update an entity mapping to link it to a person.
+
+    Args:
+        mapping_id: Entity mapping ID
+        person_id: Person to link to
+        confidence: Match confidence
+
+    Returns:
+        True if updated, False otherwise
+    """
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE entity_mappings
+                SET person_id = %s, confidence = %s, updated_at = NOW()
+                WHERE id = %s
+            """, (person_id, confidence, mapping_id))
+            return cursor.rowcount > 0
+    except Exception as e:
+        logger.error("Error updating entity mapping %d: %s", mapping_id, repr(e))
+        return False
+
+
 # ============================================================================
 # Classification Helper Functions
 # ============================================================================

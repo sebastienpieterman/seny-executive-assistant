@@ -101,6 +101,16 @@ class PeopleService:
         if not person_id:
             raise ValueError("Failed to create person")
 
+        # Event-driven reconciliation: check if any unresolved entity_mappings match this new person
+        try:
+            from web.services.entity_resolver import EntityResolver
+            resolver = EntityResolver(self.user_id)
+            resolved = resolver.reconcile_for_new_person(person_id, name)
+            if resolved > 0:
+                logger.info("Auto-resolved %d entity mappings for new person %s", resolved, name)
+        except Exception as e:
+            logger.error("Entity reconciliation failed for new person %s: %s", name, repr(e))
+
         # Return created person with contact enrichment
         person = db_get_person(person_id)
         if contact_info:

@@ -17,6 +17,7 @@ from web.core.database import (
     get_person,
     resolve_entity,
     upsert_entity_mapping,
+    update_entity_mapping_person,
 )
 
 logger = logging.getLogger(__name__)
@@ -369,7 +370,7 @@ class EntityResolver:
             with get_db() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT source, source_identifier, display_name, confidence,
+                    SELECT id, source, source_identifier, display_name, confidence,
                            created_at, updated_at
                     FROM entity_mappings
                     WHERE user_id = %s AND person_id IS NULL
@@ -380,3 +381,48 @@ class EntityResolver:
             logger.error("Error getting unresolved entities for user %d: %s", self.user_id, e)
 
         return results
+
+    def reconcile_for_new_person(self, person_id: int, person_name: str) -> int:
+        """Re-match unresolved entity_mappings against a newly created person.
+
+        Called when a new person is added — checks if any existing unresolved
+        mappings now match this person's name.
+
+        Returns count of resolved mappings.
+        """
+        unresolved = []
+        try:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT id, source, source_identifier, display_name, confidence
+                    FROM entity_mappings
+                    WHERE user_id = %s AND person_id IS NULL
+                    ORDER BY display_name
+                """, (self.user_id,))
+                unresolved = [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error("Error fetching unresolved mappings for reconciliation: %s", repr(e))
+            return 0
+
+        if not unresolved:
+            return 0
+
+        person_record = [{"id": person_id, "name": person_name}]
+        count = 0
+
+        for mapping in unresolved:
+            display_name = mapping.get("display_name")
+            if not display_name:
+                continue
+
+            matched_id, confidence = self._match_by_name(display_name, person_record)
+            if matched_id and confidence > 0:
+                if update_entity_mapping_person(mapping["id"], person_id, confidence):
+                    count += 1
+
+        if count > 0:
+            logger.info("Reconciled %d unresolved mappings for new person %s (id=%d)",
+                        count, person_name, person_id)
+
+        return count

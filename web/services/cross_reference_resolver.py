@@ -179,7 +179,7 @@ class CrossReferenceResolver:
             for name in people_mentioned:
                 if not name or not isinstance(name, str):
                     continue
-                person_id = self._match_person_by_name(name, people_db)
+                person_id, confidence = self._match_person_by_name(name, people_db)
                 if person_id and person_id not in resolved_ids:
                     ref_id = insert_cross_reference(
                         user_id=self.user_id,
@@ -187,7 +187,7 @@ class CrossReferenceResolver:
                         entity_type="person",
                         entity_id=person_id,
                         relationship="mentioned",
-                        confidence=0.8,
+                        confidence=confidence,
                     )
                     if ref_id is not None:
                         count += 1
@@ -230,29 +230,52 @@ class CrossReferenceResolver:
 
         return None
 
-    def _match_person_by_name(self, name: str, people: list[dict]) -> Optional[int]:
+    def _match_person_by_name(self, name: str, people: list[dict]) -> tuple[Optional[int], float]:
         """
-        Match a name against People DB using exact case-insensitive matching only.
-        Avoids fuzzy/substring to prevent false positives in cross-referencing.
+        Match a name against People DB using tiered string comparison.
+
+        Confidence tiers (in priority order):
+        - Exact match (case-insensitive): 1.0
+        - First name match (>= 3 chars): 0.8
+        - Substring match (both >= 4 chars): 0.6
+
+        Returns:
+            (person_id, confidence) or (None, 0.0) if no match.
         """
         name_lower = name.strip().lower()
         if not name_lower:
-            return None
+            return (None, 0.0)
+
+        name_first = name_lower.split()[0]
+
+        best_match = None
+        best_confidence = 0.0
 
         for person in people:
             person_name = (person.get("name") or "").strip().lower()
             if not person_name:
                 continue
-            # Exact match
-            if name_lower == person_name:
-                return person["id"]
-            # First name match (only if both sides are just a first name)
-            name_first = name_lower.split()[0]
-            person_first = person_name.split()[0]
-            if len(name_first) >= 3 and name_first == person_first:
-                return person["id"]
 
-        return None
+            # Exact match — return immediately
+            if name_lower == person_name:
+                return (person["id"], 1.0)
+
+            person_first = person_name.split()[0]
+
+            # First name match (>= 3 chars)
+            if name_first and person_first and len(name_first) >= 3 and name_first == person_first:
+                if best_confidence < 0.8:
+                    best_match = person["id"]
+                    best_confidence = 0.8
+
+            # Substring match (one name contains the other, both >= 4 chars)
+            if len(name_lower) >= 4 and len(person_name) >= 4:
+                if name_lower in person_name or person_name in name_lower:
+                    if best_confidence < 0.6:
+                        best_match = person["id"]
+                        best_confidence = 0.6
+
+        return (best_match, best_confidence)
 
     # -------------------------------------------------------------------------
     # Project resolution
