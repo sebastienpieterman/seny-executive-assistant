@@ -12165,7 +12165,7 @@ def record_screen_dismissal(
 
     Args:
         user_id: User's database ID
-        vision_status: What the Vision model flagged ("drifting" or "adult_content")
+        vision_status: What the Vision model flagged (e.g. "drifting")
         user_reason: What the user said when dismissing (e.g. "watching a tutorial")
         calendar_context: Brief summary of calendar state at dismissal time
         accepted: Whether Claude accepted the dismissal (True) or pushed back (False)
