@@ -4,14 +4,14 @@
 
 # Seny
 
-**Your self-hosted AI executive assistant. Proactive. Personal. Yours.**
+**Your self-hosted AI executive assistant. Private. Proactive. Yours.**
 
 [![License: PolyForm NC](https://img.shields.io/badge/license-PolyForm%20NC%201.0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB.svg)](https://python.org)
 [![Powered by Claude](https://img.shields.io/badge/powered%20by-Claude%20(Anthropic)-D4A574.svg)](https://anthropic.com)
 [![Deploy on Railway](https://img.shields.io/badge/deploy-Railway-0B0D0E.svg)](https://railway.app)
 
-A personal AI assistant that connects to your email, calendar, Slack, and Telegram, then ties everything together so you never miss what matters. Built for people who want an AI that works *for* them — self-hosted, with your data staying on your own infrastructure. Conversations are processed by Anthropic's Claude API (subject to [Anthropic's usage policy](https://www.anthropic.com/policies)), but nothing is stored or shared beyond that.
+A personal AI assistant that connects to your email, calendar, Slack, and Telegram, then ties everything together so you never miss what matters. Built for people who want an AI that works *for* them without handing their data to a third party.
 
 [Get Started](#quick-start-railway--recommended) · [Features](#features) · [Integrations](#adding-integrations-optional) · [Troubleshooting](#troubleshooting)
 
@@ -27,7 +27,7 @@ The explosion of AI agents in 2025–2026 proved something important: giving an 
 
 It connects to your email, calendar, Slack, and Telegram — but it can't execute arbitrary commands on your machine, it can't browse the web as you, and it can't take destructive actions without your approval. When Seny wants to send an email, create a calendar event, or act on your behalf, it proposes the action and waits for you to approve or dismiss it. You stay in the loop on everything that matters, without being buried in confirmation dialogs for every small thing.
 
-Self-hosted and designed with the principle that your AI assistant should work *for* you, not *as* you. Your data lives on your own infrastructure — the only external service is Anthropic's Claude API, which processes your conversations but does not train on them or retain them beyond the API request (see [Anthropic's API data policy](https://www.anthropic.com/policies)).
+Self-hosted, private, and designed with the principle that your AI assistant should work *for* you, not *as* you.
 
 > [!NOTE]
 > **A word from the creator:** Seny started as a personal project, built over months for my own daily use, deeply integrated with my own email, calendar, relationships, and workflows. To make it available publicly, I stripped out every piece of personal data, replaced hardcoded context with a setup wizard, and tested the result from scratch. But a codebase that was built around one person's life for months is hard to fully sanitize and re-generalize in one pass. If you run into bugs, rough edges, or something that doesn't quite make sense, that's likely a remnant of that process. Please open an issue on GitHub and I'll fix it.
