@@ -22,6 +22,7 @@ from web.core.database import (
     update_channel_exclusion_preferences as db_update_channel_exclusion,
     get_scanner_preferences,
     update_scanner_preferences as db_update_scanner_preferences,
+    get_daily_classification_count,
     get_user_profile,
     set_lcd_layer1,
 )
@@ -1002,6 +1003,7 @@ class ScannerSettings(BaseModel):
     scanner_telegram_interval_minutes: Optional[int] = None
     scanner_calendar_interval_minutes: Optional[int] = None
     classification_tier: Optional[str] = None
+    daily_classification_limit: Optional[int] = None
 
 
 class ScannerSettingsResponse(BaseModel):
@@ -1011,6 +1013,8 @@ class ScannerSettingsResponse(BaseModel):
     scanner_telegram_interval_minutes: int
     scanner_calendar_interval_minutes: int
     classification_tier: str
+    daily_classification_limit: int
+    daily_classification_count: int
 
 
 @router.get("/scanner", response_model=ScannerSettingsResponse)
@@ -1018,9 +1022,11 @@ async def get_scanner_settings(user_id: str = Depends(require_auth)):
     """
     Get current scanner preferences.
 
-    Returns the user's scanner interval settings and classification tier.
+    Returns the user's scanner interval settings, classification tier,
+    daily classification limit, and today's usage count.
     """
     prefs = get_scanner_preferences(int(user_id))
+    prefs["daily_classification_count"] = get_daily_classification_count(int(user_id))
     return ScannerSettingsResponse(**prefs)
 
 
@@ -1032,7 +1038,8 @@ async def update_scanner_settings(
     """
     Update scanner preferences.
 
-    Allows users to change per-source scan intervals and AI classification tier.
+    Allows users to change per-source scan intervals, AI classification tier,
+    and daily classification limit.
     """
     # Validate intervals (5-1440 minutes)
     interval_fields = [
@@ -1058,13 +1065,22 @@ async def update_scanner_settings(
                 detail="Invalid classification_tier: must be 'haiku' or 'full'"
             )
 
+    # Validate daily classification limit
+    if settings.daily_classification_limit is not None:
+        if settings.daily_classification_limit < 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid daily_classification_limit: must be 0 (unlimited) or positive"
+            )
+
     success = db_update_scanner_preferences(
         user_id=int(user_id),
         scanner_gmail_interval_minutes=settings.scanner_gmail_interval_minutes,
         scanner_slack_interval_minutes=settings.scanner_slack_interval_minutes,
         scanner_telegram_interval_minutes=settings.scanner_telegram_interval_minutes,
         scanner_calendar_interval_minutes=settings.scanner_calendar_interval_minutes,
-        classification_tier=settings.classification_tier
+        classification_tier=settings.classification_tier,
+        daily_classification_limit=settings.daily_classification_limit
     )
 
     if not success:
@@ -1073,8 +1089,9 @@ async def update_scanner_settings(
             detail="Failed to update scanner settings"
         )
 
-    # Return updated preferences
+    # Return updated preferences with today's usage count
     prefs = get_scanner_preferences(int(user_id))
+    prefs["daily_classification_count"] = get_daily_classification_count(int(user_id))
     return ScannerSettingsResponse(**prefs)
 
 

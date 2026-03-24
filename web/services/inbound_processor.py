@@ -23,9 +23,12 @@ from zoneinfo import ZoneInfo
 from web.core.database import (
     get_db,
     increment_classification_attempts,
+    mark_scanned_item_processed,
     get_pending_action_by_source_ref,
     create_pending_action,
     get_nudge_preferences,
+    get_daily_classification_count,
+    get_scanner_preferences,
 )
 from web.services.prefilter_service import PreFilterService
 from web.services.inbound_classifier import InboundClassifier
@@ -69,6 +72,7 @@ class InboundProcessor:
             "internal": 0,
             "classified": 0,
             "failed": 0,
+            "cost_limited": 0,
             "actions_detected": 0,
             "cross_references_created": 0,
             "calendar_proposals_created": 0,
@@ -89,7 +93,6 @@ class InboundProcessor:
             attempts = item.get("classification_attempts") or 0
             if attempts >= MAX_CLASSIFICATION_ATTEMPTS:
                 # Skip permanently — mark as processed with 'max_retries' label
-                from web.core.database import mark_scanned_item_processed
                 mark_scanned_item_processed(item["id"], "max_retries")
                 stats["failed"] += 1
                 logger.warning(
@@ -114,9 +117,37 @@ class InboundProcessor:
             stats["duration_seconds"] = time.time() - start
             return stats
 
+        # Step 2.5: Check daily classification limit
+        prefs = get_scanner_preferences(self.user_id)
+        daily_limit = prefs.get("daily_classification_limit", 200)
+        remaining_quota = None  # None = unlimited
+
+        if daily_limit > 0:
+            used_today = get_daily_classification_count(self.user_id)
+            remaining_quota = max(0, daily_limit - used_today)
+            if remaining_quota == 0:
+                # Cap reached — mark all passed items as cost_limited
+                for item in passed_items:
+                    mark_scanned_item_processed(item["id"], "cost_limited")
+                stats["cost_limited"] = len(passed_items)
+                stats["duration_seconds"] = time.time() - start
+                logger.warning(
+                    "Daily classification limit reached (%d/%d). Skipping %d items.",
+                    used_today, daily_limit, len(passed_items)
+                )
+                return stats
+
         # Step 3: Classify with Haiku (sequential with delay)
         classified_items = []
         for item in passed_items:
+            # Check per-item quota before classification
+            if remaining_quota is not None:
+                if remaining_quota <= 0:
+                    mark_scanned_item_processed(item["id"], "cost_limited")
+                    stats["cost_limited"] = stats.get("cost_limited", 0) + 1
+                    continue
+                remaining_quota -= 1
+
             try:
                 classification = await self.classifier.classify_item(item)
                 if classification:
