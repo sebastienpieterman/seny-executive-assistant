@@ -197,35 +197,60 @@ Start chatting with Seny. Try things like:
 - "Create a note about the meeting I just had"
 - "What did we talk about last week?"
 
-## Alternative: Run with Docker (Local)
+## Alternative: Local Development
 
-If you want to run Seny on your own computer instead of Railway, you can use Docker. This is more advanced and means Seny only works when your computer is on.
+If you want to run Seny on your own computer instead of Railway. This is more advanced and means Seny only works when your computer is on.
 
-1. Install [Docker Desktop](https://docker.com/products/docker-desktop)
+### Prerequisites
 
-2. Clone the repository:
+- **Python 3.11+** — [python.org/downloads](https://www.python.org/downloads/)
+- **Docker Desktop** — [docker.com/products/docker-desktop](https://docker.com/products/docker-desktop) (for PostgreSQL)
+- **Node.js 18+** — [nodejs.org](https://nodejs.org/) (for the frontend build)
+
+### Step-by-step
+
+1. **Clone the repository:**
    ```bash
    git clone https://github.com/YOUR-USERNAME/Seny.git
    cd Seny
    ```
 
-3. Build and run:
+2. **Start PostgreSQL** (Seny requires PostgreSQL for all environments):
    ```bash
-   docker build -t seny .
-   docker run -d \
-     -p 8000:8000 \
-     -e ANTHROPIC_API_KEY=your-key-here \
-     -e SECRET_KEY=your-secret-here \
-     -v seny-data:/app/data \
-     --name seny \
-     seny
+   docker-compose up -d
+   ```
+   This starts a PostgreSQL database in the background. Your data persists across restarts.
+
+3. **Set up your Python environment:**
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
    ```
 
-4. Open [http://localhost:8000](http://localhost:8000) in your browser
+4. **Install frontend dependencies:**
+   ```bash
+   cd web/frontend
+   npm install
+   cd ../..
+   ```
 
-5. Register an account and complete the setup wizard
+5. **Set up environment variables:**
+   ```bash
+   cp .env.example .env
+   ```
+   Open `.env` in a text editor. Add your `ANTHROPIC_API_KEY` and `SECRET_KEY`. The `DATABASE_URL` is pre-configured for docker-compose — no changes needed.
 
-Note: Without a PostgreSQL database, Seny uses SQLite (a simpler database stored in a file). The `-v seny-data:/app/data` part in the command above makes sure your data survives container restarts. For a more robust setup, consider adding a PostgreSQL container.
+6. **Run the app:**
+   ```bash
+   python start.py
+   ```
+
+7. Open [http://localhost:8000](http://localhost:8000) in your browser
+
+8. Register an account and complete the setup wizard
+
+> **Migrating from SQLite?** If you previously used an older version of Seny with SQLite, run `python scripts/migrate_sqlite_to_pg.py` to move your data to PostgreSQL.
 
 ## Adding Integrations (Optional)
 
@@ -330,14 +355,15 @@ These must be set or the app will not start.
 |----------|-------------|
 | `ANTHROPIC_API_KEY` | Your Claude API key from [console.anthropic.com](https://console.anthropic.com). Starts with `sk-ant-`. |
 | `SECRET_KEY` | A random string used to sign login tokens. Generate with `python3 -c "import secrets; print(secrets.token_hex(32))"` |
+| `DATABASE_URL` | PostgreSQL connection string. For local dev: `docker-compose up -d` and use the default from `.env.example`. For Railway: automatically set when you add a PostgreSQL plugin. |
 
 ### Automatically Set by Railway
 
-You do not need to set these yourself if you are using Railway with PostgreSQL.
+You do not need to set these yourself if you are using Railway.
 
 | Variable | Description |
 |----------|-------------|
-| `DATABASE_URL` | PostgreSQL connection string. Railway sets this automatically when you add a PostgreSQL database. |
+| `DATABASE_URL` | Railway sets this automatically when you add a PostgreSQL database. |
 | `PORT` | The port the server listens on. Railway sets this automatically. |
 | `RAILWAY_ENVIRONMENT` | Set by Railway to indicate production environment. |
 
@@ -404,12 +430,6 @@ Not strictly required, but you should set these for a proper deployment.
 |----------|-------------|
 | `GIPHY_API_KEY` | Giphy API key for GIF search in Telegram bot |
 
-### Database (Advanced)
-
-| Variable | Description |
-|----------|-------------|
-| `DATABASE_PATH` | Custom path for SQLite database file (only used when `DATABASE_URL` is not set) |
-
 ### Security (Advanced)
 
 | Variable | Description |
@@ -434,9 +454,7 @@ This happens when your browser blocks requests because the server does not recog
 
 ### Data disappeared after a redeploy
 
-This means you are running without PostgreSQL. Without it, Seny uses SQLite, which stores data inside the container — and containers are rebuilt on every deploy.
-
-**Fix:** Add a PostgreSQL database (see Step 4 in the Quick Start). Your data will persist across redeploys from that point forward. Unfortunately, data from before adding PostgreSQL cannot be recovered.
+This usually means your PostgreSQL database was removed or recreated. On Railway, make sure you have a PostgreSQL plugin attached to your project (see Step 4 in the Quick Start). Your data persists across redeploys as long as the database service is intact.
 
 ### Gmail or Calendar not connecting
 

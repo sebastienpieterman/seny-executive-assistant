@@ -1,3 +1,10 @@
+# OpenWolf
+
+@.wolf/OPENWOLF.md
+
+This project uses OpenWolf for context management. Read and follow .wolf/OPENWOLF.md every session. Check .wolf/cerebrum.md before generating code. Check .wolf/anatomy.md before reading files.
+
+
 # CLAUDE.md
 
 This file provides guidance to Claude Code when working with this repository.
@@ -9,7 +16,7 @@ Seny is a personal AI assistant built as a "Second Brain" system. It uses Claude
 ## Tech Stack
 
 - **Backend:** Python 3.11+, FastAPI, Anthropic SDK
-- **Database:** PostgreSQL (production) or SQLite (development)
+- **Database:** PostgreSQL (all environments)
 - **Auth:** JWT (python-jose), bcrypt
 - **Frontend:** React (TypeScript), Radix UI, Tailwind CSS
 - **Build:** Vite
@@ -62,9 +69,13 @@ cd web/frontend
 npm install
 cd ../..
 
+# Start PostgreSQL (requires Docker)
+docker-compose up -d
+
 # Create .env from template
 cp .env.example .env
 # Edit .env — add at minimum: ANTHROPIC_API_KEY and SECRET_KEY
+# DATABASE_URL is pre-configured for docker-compose
 
 # Run locally
 python start.py
@@ -83,7 +94,7 @@ Business logic lives in `web/services/`. The main service is `claude_service.py`
 
 ### Database
 
-`web/core/database.py` handles all database operations. Schema is auto-created on first run via `init_db()`. Supports both SQLite and PostgreSQL (determined by `DATABASE_URL` env var).
+`web/core/database.py` handles all database operations. Schema is auto-created on first run via `init_db()`. Requires PostgreSQL (`DATABASE_URL` env var must be set).
 
 ### Authentication
 

@@ -41,9 +41,6 @@ RUN cd web/frontend && npm run build
 # Make start script executable
 RUN chmod +x start.sh
 
-# Create data directory for SQLite database
-RUN mkdir -p ./data
-
 # Expose port (Railway sets PORT env var dynamically)
 EXPOSE 8000
 
