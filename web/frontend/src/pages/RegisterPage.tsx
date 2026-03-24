@@ -33,6 +33,11 @@ export function RegisterPage() {
         body: JSON.stringify({ email, password }),
       });
 
+      if (regRes.status === 429) {
+        setError("Too many registration attempts. Please wait and try again later.");
+        return;
+      }
+
       if (!regRes.ok) {
         const body = await regRes.json().catch(() => null);
         setError(body?.detail || "Registration failed. Please try again.");

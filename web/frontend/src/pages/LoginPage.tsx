@@ -26,6 +26,11 @@ export function LoginPage() {
         body: JSON.stringify({ email, password }),
       });
 
+      if (res.status === 429) {
+        setError("Too many login attempts. Please wait a minute and try again.");
+        return;
+      }
+
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         setError(body?.detail || "Invalid email or password");
