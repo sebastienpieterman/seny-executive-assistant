@@ -150,6 +150,30 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)
         """)
 
+        # Create token_blocklist table for JWT revocation
+        # Stores JTI (JWT ID) of revoked tokens until they expire
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS token_blocklist (
+                id BIGSERIAL PRIMARY KEY,
+                jti TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+            )
+        """)
+
+        # Create index on jti for fast blocklist lookups during token verification
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_token_blocklist_jti ON token_blocklist(jti)
+        """)
+
+        # Clean up expired blocklist entries on startup
+        # For a single-user app with 7-day tokens, startup cleanup is sufficient
+        cursor.execute("""
+            DELETE FROM token_blocklist WHERE expires_at < CURRENT_TIMESTAMP
+        """)
+
         # Create conversations table
         # Stores conversation metadata with foreign key to users
         cursor.execute("""
