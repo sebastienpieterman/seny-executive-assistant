@@ -6,11 +6,12 @@ Provides user registration and login with JWT token generation.
 
 import re
 from typing import Optional
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Request, status, Depends
 from pydantic import BaseModel, EmailStr, field_validator
 import bcrypt
 from web.core.database import create_user, get_user_by_email
 from web.auth.jwt_utils import create_access_token, require_auth
+from web.core.rate_limit import limiter
 
 
 # Create auth router
@@ -64,15 +65,16 @@ class MessageResponse(BaseModel):
     message: str
 
 
+@limiter.limit("5/hour")
 @router.post("/register", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
-async def register(request: RegisterRequest):
+async def register(request: Request, body: RegisterRequest):
     """
     Register a new user.
 
     Creates a new user account with hashed password.
 
     Args:
-        request: RegisterRequest with email and password
+        body: RegisterRequest with email and password
 
     Returns:
         MessageResponse confirming user creation
@@ -90,12 +92,12 @@ async def register(request: RegisterRequest):
     # Hash the password (bcrypt automatically generates salt)
     # SECURITY: Never store plaintext passwords!
     # bcrypt has a max password length of 72 bytes, truncate if needed
-    password_bytes = request.password.encode('utf-8')[:72]
+    password_bytes = body.password.encode('utf-8')[:72]
     salt = bcrypt.gensalt()
     hashed_password = bcrypt.hashpw(password_bytes, salt).decode('utf-8')
 
     # Attempt to create user in database
-    user_id = create_user(email=request.email, hashed_password=hashed_password)
+    user_id = create_user(email=body.email, hashed_password=hashed_password)
 
     if user_id is None:
         # Email already exists (UNIQUE constraint violation)
@@ -107,15 +109,16 @@ async def register(request: RegisterRequest):
     return MessageResponse(message="User created successfully")
 
 
+@limiter.limit("10/minute")
 @router.post("/login", response_model=AuthResponse)
-async def login(request: LoginRequest):
+async def login(request: Request, body: LoginRequest):
     """
     Authenticate a user and generate JWT token.
 
     Validates credentials and returns access token for authenticated requests.
 
     Args:
-        request: LoginRequest with email and password
+        body: LoginRequest with email and password
 
     Returns:
         AuthResponse with access_token and token_type
@@ -131,7 +134,7 @@ async def login(request: LoginRequest):
         - Token expires after 60 minutes (configurable)
     """
     # Retrieve user from database
-    user = get_user_by_email(request.email)
+    user = get_user_by_email(body.email)
 
     # SECURITY: Generic error message for any auth failure
     # Don't reveal whether email or password was wrong (prevents email enumeration)
@@ -145,7 +148,7 @@ async def login(request: LoginRequest):
     # Verify password with constant-time comparison
     # bcrypt.checkpw() uses secure comparison
     # bcrypt has a max password length of 72 bytes, truncate if needed
-    password_bytes = request.password.encode('utf-8')[:72]
+    password_bytes = body.password.encode('utf-8')[:72]
     hashed_password_bytes = user["hashed_password"].encode('utf-8')
     if not bcrypt.checkpw(password_bytes, hashed_password_bytes):
         # SECURITY: Same generic error message as above
@@ -165,8 +168,9 @@ async def login(request: LoginRequest):
     return AuthResponse(access_token=access_token, token_type="bearer")
 
 
+@limiter.limit("5/hour")
 @router.post("/desktop-token", response_model=AuthResponse)
-async def generate_desktop_token(user_id: str = Depends(require_auth)):
+async def generate_desktop_token(request: Request, user_id: str = Depends(require_auth)):
     """
     Generate a permanent token for the desktop app.
 
