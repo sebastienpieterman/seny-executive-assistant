@@ -163,7 +163,7 @@ async def login(request: Request, body: LoginRequest):
     # Token contains user_id claim for identifying the authenticated user
     access_token = create_access_token(
         user_id=str(user["id"]),
-        expires_minutes=43200  # 30 days
+        expires_minutes=10080  # 7 days — balances security with convenience for daily-use personal assistant
     )
 
     return AuthResponse(access_token=access_token, token_type="bearer")
@@ -234,17 +234,18 @@ async def generate_desktop_token(request: Request, user_id: str = Depends(requir
         user_id: Authenticated user ID (from JWT)
 
     Returns:
-        AuthResponse with permanent access_token
+        AuthResponse with long-lived access_token
 
     Security:
         - Requires existing authentication
         - Token is still tied to user_id
-        - Can be revoked by changing SECRET_KEY (invalidates all tokens)
+        - Token expires after 90 days — regenerate periodically
+        - Can be revoked via /logout or by changing SECRET_KEY
     """
-    # Generate a permanent token (no expiration)
+    # Generate a long-lived token for desktop app convenience
     access_token = create_access_token(
         user_id=user_id,
-        expires_minutes=None  # Never expires
+        expires_minutes=129600  # 90 days — long-lived for desktop app convenience, regenerate periodically
     )
 
     return AuthResponse(access_token=access_token, token_type="bearer")
