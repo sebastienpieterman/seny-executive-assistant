@@ -5,11 +5,16 @@ Provides secure token creation, validation, and FastAPI dependency
 for protecting routes with JWT authentication.
 """
 
+import logging
+import uuid
 from datetime import datetime, timedelta
 from typing import Optional
 from jose import jwt, JWTError, ExpiredSignatureError
 from fastapi import HTTPException, Header
 from src.core.config import Config
+from web.core.database import get_db
+
+logger = logging.getLogger(__name__)
 
 
 def create_access_token(user_id: str, expires_minutes: Optional[int] = 60) -> str:
@@ -33,10 +38,11 @@ def create_access_token(user_id: str, expires_minutes: Optional[int] = 60) -> st
     # Get current time once for consistency
     now = datetime.utcnow()
 
-    # Create payload with user_id and issued-at time
+    # Create payload with user_id, issued-at time, and unique token ID
     payload = {
         "user_id": user_id,
         "iat": now,
+        "jti": str(uuid.uuid4()),
     }
 
     # Add expiry only if specified (None = never expires)
@@ -79,6 +85,21 @@ def verify_token(token: str) -> Optional[dict]:
             Config.SECRET_KEY,
             algorithms=[Config.ALGORITHM]
         )
+
+        # Check blocklist for tokens with JTI claim
+        jti = payload.get("jti")
+        if jti is None:
+            # Legacy token without jti — allow but warn
+            logger.warning("Token without jti claim — legacy token, allowing but cannot be revoked")
+            return payload
+
+        # Check if token has been revoked
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM token_blocklist WHERE jti = %s", (jti,))
+            if cur.fetchone() is not None:
+                return None
+
         return payload
 
     except ExpiredSignatureError:
@@ -185,7 +206,6 @@ def require_screen_agent(x_screen_agent_key: Optional[str] = Header(None)) -> st
     """
     if not x_screen_agent_key:
         raise HTTPException(status_code=401, detail="Missing X-Screen-Agent-Key header")
-    from web.core.database import get_db
     with get_db() as conn:
         _cur = conn.cursor()
 
