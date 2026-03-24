@@ -10,4 +10,4 @@ print(f"Starting Seny on port {port}")
 sys.stdout.flush()
 
 # Start uvicorn
-os.execvp("uvicorn", ["uvicorn", "web.main:app", "--host", "0.0.0.0", "--port", port])
+os.execvp("uvicorn", ["uvicorn", "web.main:app", "--host", "0.0.0.0", "--port", port, "--proxy-headers"])

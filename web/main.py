@@ -26,6 +26,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 print("SENY STARTUP: Imported FastAPI middleware", flush=True)
 
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+print("SENY STARTUP: Imported slowapi", flush=True)
+
 print("SENY STARTUP: Importing routers...", flush=True)
 from web.api.routes import router
 print("SENY STARTUP: Imported routes", flush=True)
@@ -381,6 +386,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Rate limiting (slowapi)
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Include API routes
 app.include_router(router, prefix="/api")
