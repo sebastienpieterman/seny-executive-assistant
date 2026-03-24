@@ -1,8 +1,8 @@
 """
-SQLite database management for Seny web application.
+PostgreSQL database management for Seny web application.
 
 Handles database initialization and connection management.
-Uses raw sqlite3 module without ORM for simplicity.
+Uses psycopg2 without ORM for simplicity.
 """
 
 import hashlib
@@ -12,10 +12,8 @@ import logging
 import os
 import re
 import secrets
-import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Optional
 from contextlib import contextmanager
 
@@ -24,11 +22,7 @@ import psycopg2.pool
 import psycopg2.extras
 
 
-# Database file location
-# Use DATABASE_PATH env var if set (for Railway volume), otherwise use relative path
-DB_PATH = Path(os.environ.get("DATABASE_PATH", Path(__file__).parent.parent.parent / "data" / "seny.db"))
-
-# PostgreSQL connection pool (initialized on first use if DATABASE_URL is set)
+# PostgreSQL connection pool (initialized on first use)
 _pg_pool: Optional[psycopg2.pool.SimpleConnectionPool] = None
 
 # Register psycopg2 type casters that return ISO strings for timestamp columns.
@@ -47,12 +41,18 @@ psycopg2.extensions.register_type(_TSTZ)
 psycopg2.extensions.register_type(_DATE)
 
 
-def _get_pg_pool() -> Optional[psycopg2.pool.SimpleConnectionPool]:
+def _get_pg_pool() -> psycopg2.pool.SimpleConnectionPool:
     """Get or create the PostgreSQL connection pool."""
     global _pg_pool
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
-        return None
+        raise RuntimeError(
+            "DATABASE_URL environment variable is required. "
+            "SQLite is no longer supported.\n"
+            "For local development, use: docker-compose up -d postgres\n"
+            "For Railway deployment, add a PostgreSQL plugin.\n"
+            "To migrate existing SQLite data: python scripts/migrate_sqlite_to_pg.py"
+        )
     if _pg_pool is None:
         _pg_pool = psycopg2.pool.SimpleConnectionPool(
             minconn=1,
@@ -104,7 +104,7 @@ def extract_snippet(text: str, query: str, context_chars: int = 150, bold_start:
 
 def init_db() -> None:
     """
-    Initialize the SQLite database and create tables if they don't exist.
+    Initialize the PostgreSQL database and create tables if they don't exist.
 
     Creates:
         - users table: For user authentication and data association
@@ -112,42 +112,11 @@ def init_db() -> None:
     This function is idempotent - safe to call multiple times.
     Uses IF NOT EXISTS to avoid errors on repeated calls.
     """
-    # Connect to the appropriate database backend
+    # Connect to PostgreSQL
     _pool = _get_pg_pool()
-    _is_pg = _pool is not None
-    if _is_pg:
-        conn = _pool.getconn()
-        conn.autocommit = True  # each statement is its own transaction — no cascade failures
-    else:
-        # SQLite fallback (local dev without DATABASE_URL)
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(DB_PATH)
-    _raw_cursor = conn.cursor()
-
-    # Wrap cursor to translate PostgreSQL schema syntax to SQLite when on SQLite backend.
-    # This lets us keep a single PostgreSQL-style schema in the source while still
-    # supporting SQLite for local dev (no DATABASE_URL set).
-    if not _is_pg:
-        import re as _re
-        class _SQLiteAdaptedCursor:
-            """Proxy cursor that translates PG-specific DDL/DML to SQLite equivalents."""
-            def execute(self, sql, params=None):
-                sql = sql.replace('BIGSERIAL PRIMARY KEY', 'INTEGER PRIMARY KEY AUTOINCREMENT')
-                sql = sql.replace('DEFAULT NOW()', "DEFAULT (datetime('now'))")
-                # ON CONFLICT DO NOTHING → INSERT OR IGNORE
-                if _re.search(r'\bON\s+CONFLICT\s+DO\s+NOTHING\b', sql, _re.IGNORECASE):
-                    sql = _re.sub(r'\s*ON\s+CONFLICT\s+DO\s+NOTHING\b', '', sql, flags=_re.IGNORECASE)
-                    sql = _re.sub(r'\bINSERT\s+INTO\b', 'INSERT OR IGNORE INTO', sql, count=1, flags=_re.IGNORECASE)
-                # %s → ? (parameter placeholders)
-                sql = sql.replace('%s', '?')
-                if params is not None:
-                    return _raw_cursor.execute(sql, params)
-                return _raw_cursor.execute(sql)
-            def __getattr__(self, name):
-                return getattr(_raw_cursor, name)
-        cursor = _SQLiteAdaptedCursor()
-    else:
-        cursor = _raw_cursor
+    conn = _pool.getconn()
+    conn.autocommit = True  # each statement is its own transaction — no cascade failures
+    cursor = conn.cursor()
 
     # Timing diagnostics for Railway deploy investigation (Issue #13)
     init_start = time.time()
@@ -155,10 +124,9 @@ def init_db() -> None:
     print(f"[INIT_DB] Starting database initialization...")
 
     try:
-        # Enable pg_trgm for fast text search (PostgreSQL only — no-op path for SQLite)
-        if get_database_backend() == 'postgresql':
-            cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
-            conn.commit()
+        # Enable pg_trgm for fast text search
+        cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        conn.commit()
 
         # ============================================================================
         # SECTION: Core Tables (users, conversations, messages)
@@ -877,10 +845,11 @@ def init_db() -> None:
         """)
 
         # Migration: Rename gmail_tokens to google_tokens if old table exists
-        # This handles existing databases from
+        # This handles existing databases from before the rename
         try:
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='gmail_tokens'")
-            if cursor.fetchone():
+            cursor.execute("SELECT to_regclass('gmail_tokens')")
+            result = cursor.fetchone()
+            if result and result[0] is not None:
                 # Old table exists - migrate data to new table
                 cursor.execute("""
                     INSERT INTO google_tokens
@@ -2795,28 +2764,25 @@ def init_db() -> None:
         """)
 
         # ============================================================================
-        # SECTION: GIN Indexes (PostgreSQL only — replaces FTS5 virtual tables)
+        # SECTION: GIN Indexes (pg_trgm text search)
         # ============================================================================
-        # GIN indexes for pg_trgm text search (replaces FTS5 virtual tables)
-        # Only run in PostgreSQL — SQLite doesn't support GIN indexes
-        if get_database_backend() == 'postgresql':
-            gin_indexes = [
-                "CREATE INDEX IF NOT EXISTS idx_messages_content_trgm ON messages USING GIN (content gin_trgm_ops)",
-                "CREATE INDEX IF NOT EXISTS idx_notes_title_trgm ON notes USING GIN (title gin_trgm_ops)",
-                "CREATE INDEX IF NOT EXISTS idx_notes_content_trgm ON notes USING GIN (content gin_trgm_ops)",
-                "CREATE INDEX IF NOT EXISTS idx_local_files_path_trgm ON local_files USING GIN (file_path gin_trgm_ops)",
-                "CREATE INDEX IF NOT EXISTS idx_local_files_content_trgm ON local_files USING GIN (content_preview gin_trgm_ops)",
-                "CREATE INDEX IF NOT EXISTS idx_people_name_trgm ON people USING GIN (name gin_trgm_ops)",
-                "CREATE INDEX IF NOT EXISTS idx_projects_name_trgm ON projects USING GIN (name gin_trgm_ops)",
-                "CREATE INDEX IF NOT EXISTS idx_ideas_title_trgm ON ideas USING GIN (title gin_trgm_ops)",
-                "CREATE INDEX IF NOT EXISTS idx_google_contacts_name_trgm ON google_contacts USING GIN (display_name gin_trgm_ops)",
-                "CREATE INDEX IF NOT EXISTS idx_drive_files_name_trgm ON drive_files USING GIN (name gin_trgm_ops)",
-            ]
-            for idx_sql in gin_indexes:
-                try:
-                    cursor.execute(idx_sql)
-                except Exception as e:
-                    print(f"[INIT_DB] GIN index skipped: {e}")
+        gin_indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_messages_content_trgm ON messages USING GIN (content gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_notes_title_trgm ON notes USING GIN (title gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_notes_content_trgm ON notes USING GIN (content gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_local_files_path_trgm ON local_files USING GIN (file_path gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_local_files_content_trgm ON local_files USING GIN (content_preview gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_people_name_trgm ON people USING GIN (name gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_projects_name_trgm ON projects USING GIN (name gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_ideas_title_trgm ON ideas USING GIN (title gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_google_contacts_name_trgm ON google_contacts USING GIN (display_name gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_drive_files_name_trgm ON drive_files USING GIN (name gin_trgm_ops)",
+        ]
+        for idx_sql in gin_indexes:
+            try:
+                cursor.execute(idx_sql)
+            except Exception as e:
+                print(f"[INIT_DB] GIN index skipped: {e}")
 
         # ============================================================================
         # SECTION: Commit
@@ -2840,7 +2806,7 @@ def init_db() -> None:
         print(f"[INIT_DB] TOTAL: {total_time:.2f}s")
         print(f"[INIT_DB] ======================\n")
 
-        print(f"✓ Database initialized at {DB_PATH}")
+        print("✓ Database initialized (PostgreSQL)")
 
     except Exception as e:
         print(f"✗ Database initialization error: {e}")
@@ -2848,153 +2814,14 @@ def init_db() -> None:
         raise
 
     finally:
-        if _is_pg:
-            _pool.putconn(conn)
-        else:
-            conn.close()
-
-
-class _SQLiteRuntimeCursor:
-    """
-    Proxy cursor that translates PostgreSQL-style runtime query syntax to SQLite
-    equivalents at execution time. This allows all SQL strings in database.py to
-    be written in PostgreSQL syntax while remaining compatible with SQLite for local
-    development (when DATABASE_URL is not set).
-
-    Translations performed:
-    - %s  →  ? (parameter placeholders)
-    - RETURNING id  →  stripped; lastrowid captured and returned via fetchone()
-    - ON CONFLICT DO NOTHING  →  INSERT OR IGNORE pattern
-    - ON CONFLICT (...) DO UPDATE SET ...  →  INSERT OR REPLACE pattern
-    - NOW()  →  NOW()
-    - %%  →  % (unescape doubled literals used to avoid psycopg2 misinterpretation)
-    """
-
-    def __init__(self, raw_cursor):
-        self._cur = raw_cursor
-        self._returning_id = None
-        self._returning_active = False
-
-    def _translate(self, sql: str) -> tuple[str, bool]:
-        """
-        Translate a PostgreSQL SQL string to SQLite-compatible SQL.
-        Returns (translated_sql, returning_active).
-        """
-        returning = False
-
-        # Strip RETURNING id clause (must happen before %s replacement)
-        if re.search(r'\bRETURNING\s+id\b', sql, re.IGNORECASE):
-            sql = re.sub(r'\s*RETURNING\s+id\b', '', sql, flags=re.IGNORECASE)
-            returning = True
-
-        # ON CONFLICT DO NOTHING → INSERT OR IGNORE
-        # Pattern: INSERT INTO <table> becomes INSERT OR IGNORE INTO <table>
-        # and the ON CONFLICT DO NOTHING clause is removed
-        if re.search(r'\bON\s+CONFLICT\s+DO\s+NOTHING\b', sql, re.IGNORECASE):
-            sql = re.sub(r'\s*ON\s+CONFLICT\s+DO\s+NOTHING\b', '', sql, flags=re.IGNORECASE)
-            sql = re.sub(r'\bINSERT\s+INTO\b', 'INSERT OR IGNORE INTO', sql, count=1, flags=re.IGNORECASE)
-
-        # ON CONFLICT (...) DO UPDATE SET ... → INSERT OR REPLACE
-        # Remove the entire ON CONFLICT ... clause through end of statement
-        if re.search(r'\bON\s+CONFLICT\s*\(', sql, re.IGNORECASE):
-            sql = re.sub(r'\s*ON\s+CONFLICT\s*\(.*', '', sql, flags=re.IGNORECASE | re.DOTALL)
-            sql = re.sub(r'\bINSERT\s+INTO\b', 'INSERT OR REPLACE INTO', sql, count=1, flags=re.IGNORECASE)
-
-        # NOW() → NOW()
-        sql = re.sub(r'\bNOW\(\)', "datetime('now')", sql, flags=re.IGNORECASE)
-
-        # %s → ? (parameter placeholders — must come after all pattern rewrites)
-        sql = sql.replace('%s', '?')
-
-        # %% → % (unescape doubled literal percents used for psycopg2 compat)
-        sql = sql.replace('%%', '%')
-
-        return sql, returning
-
-    def execute(self, sql, params=None):
-        sql, self._returning_active = self._translate(sql)
-        self._returning_id = None
-        if params is not None:
-            result = self._cur.execute(sql, params)
-        else:
-            result = self._cur.execute(sql)
-        if self._returning_active:
-            # Only capture lastrowid if a row was actually inserted (rowcount > 0).
-            # For INSERT OR IGNORE on conflict, rowcount = 0 and lastrowid is stale.
-            self._returning_id = self._cur.lastrowid if self._cur.rowcount > 0 else None
-        return result
-
-    def executemany(self, sql, seq_of_params):
-        sql, _ = self._translate(sql)
-        return self._cur.executemany(sql, seq_of_params)
-
-    def fetchone(self):
-        if self._returning_active and self._returning_id is not None:
-            self._returning_active = False
-            return {'id': self._returning_id}
-        return self._cur.fetchone()
-
-    def fetchall(self):
-        return self._cur.fetchall()
-
-    def __getattr__(self, name):
-        return getattr(self._cur, name)
-
-
-class _SQLiteAdaptedConnection:
-    """
-    Proxy connection that returns _SQLiteRuntimeCursor instances from cursor()
-    and execute(). Passes through all other attributes/methods to the underlying
-    sqlite3 connection.
-    """
-
-    def __init__(self, raw_conn):
-        self._conn = raw_conn
-
-    def cursor(self):
-        return _SQLiteRuntimeCursor(self._conn.cursor())
-
-    def execute(self, sql, params=None):
-        """Shorthand execute — returns an adapted cursor after executing."""
-        adapted = _SQLiteRuntimeCursor(self._conn.cursor())
-        adapted.execute(sql, params) if params is not None else adapted.execute(sql)
-        return adapted
-
-    def executemany(self, sql, seq_of_params):
-        """Batch execute — used by save_embedding_records and similar helpers."""
-        adapted = _SQLiteRuntimeCursor(self._conn.cursor())
-        adapted.executemany(sql, seq_of_params)
-
-    def commit(self):
-        return self._conn.commit()
-
-    def rollback(self):
-        return self._conn.rollback()
-
-    def close(self):
-        return self._conn.close()
-
-    def __setattr__(self, name, value):
-        if name in ('_conn',):
-            object.__setattr__(self, name, value)
-        else:
-            setattr(self._conn, name, value)
-
-    def __getattr__(self, name):
-        return getattr(self._conn, name)
+        _pool.putconn(conn)
 
 
 @contextmanager
 def get_db():
     """
-    Context manager for database connections.
-    Uses PostgreSQL if DATABASE_URL is set, otherwise SQLite.
+    Context manager for PostgreSQL database connections.
     Automatically handles connection lifecycle and commits/rollbacks.
-
-    For the SQLite path, yields a _SQLiteAdaptedConnection that translates
-    PostgreSQL query syntax (%%s, RETURNING id, ON CONFLICT, NOW()) to SQLite
-    equivalents at runtime, allowing all SQL strings to be written in PostgreSQL
-    style throughout database.py.
 
     Usage:
         with get_db() as conn:
@@ -3003,36 +2830,16 @@ def get_db():
             users = cursor.fetchall()
     """
     pool = _get_pg_pool()
-    if pool is not None:
-        # PostgreSQL path — yield connection directly, no translation needed
-        conn = pool.getconn()
-        conn.autocommit = False
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            pool.putconn(conn)
-    else:
-        # SQLite fallback (local dev without DATABASE_URL)
-        raw_conn = sqlite3.connect(DB_PATH)
-        raw_conn.row_factory = sqlite3.Row
-        conn = _SQLiteAdaptedConnection(raw_conn)
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-
-
-def get_database_backend() -> str:
-    """Returns 'postgresql' or 'sqlite' depending on active backend."""
-    return 'postgresql' if os.environ.get('DATABASE_URL') else 'sqlite'
+    conn = pool.getconn()
+    conn.autocommit = False
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        pool.putconn(conn)
 
 
 def update_heartbeat(subsystem: str, error: str = None) -> None:
