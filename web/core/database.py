@@ -199,9 +199,9 @@ def init_db() -> None:
             cursor.execute("ALTER TABLE conversations ADD COLUMN title TEXT DEFAULT NULL")
         except Exception as e:
             # Column already exists - this is expected after first migration
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # Migration: Add model column to conversations table for per-conversation model selection
@@ -210,9 +210,9 @@ def init_db() -> None:
             cursor.execute("ALTER TABLE conversations ADD COLUMN model TEXT DEFAULT NULL")
         except Exception as e:
             # Column already exists - this is expected after first migration
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # Migration: Add type column to tasks table for task/errand distinction
@@ -222,9 +222,9 @@ def init_db() -> None:
             print("[INIT_DB] Added 'type' column to tasks table")
         except Exception as e:
             # Column already exists or table doesn't exist yet (created later with column included)
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # Migration: Clean up orphaned inbox_log entries that reference deleted admin_items table (Phase 80)
@@ -245,84 +245,84 @@ def init_db() -> None:
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN digest_enabled INTEGER DEFAULT 1")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN digest_time TEXT DEFAULT '07:00'")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN digest_email INTEGER DEFAULT 1")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN digest_push INTEGER DEFAULT 1")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN digest_timezone TEXT DEFAULT 'America/Chicago'")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # Migration: Add weekly review preferences columns
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN weekly_review_enabled INTEGER DEFAULT 1")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN weekly_review_day TEXT DEFAULT 'sunday'")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN weekly_review_time TEXT DEFAULT '18:00'")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # Migration: Add classification model preference
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN classification_model TEXT DEFAULT 'claude-haiku-4-5-20251001'")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # Migration: Add classification_attempts column for retry limiting
         try:
             cursor.execute("ALTER TABLE scanned_items ADD COLUMN classification_attempts INTEGER DEFAULT 0")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # Migration: Add direction column for outbound communications tracking (HF-03)
@@ -336,72 +336,72 @@ def init_db() -> None:
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN nudge_enabled INTEGER DEFAULT 1")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # nudge_quiet_start: Start of quiet hours (HH:MM format, user's timezone)
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN nudge_quiet_start TEXT DEFAULT '22:00'")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # nudge_quiet_end: End of quiet hours (HH:MM format, user's timezone)
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN nudge_quiet_end TEXT DEFAULT '08:00'")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # nudge_max_urgent_per_hour: Rate limit for urgent nudges
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN nudge_max_urgent_per_hour INTEGER DEFAULT 3")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # nudge_batch_interval_minutes: How often to send batched normal-priority nudges
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN nudge_batch_interval_minutes INTEGER DEFAULT 60")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # nudge_channels: JSON array of enabled channels (e.g., '["push", "slack"]')
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN nudge_channels TEXT DEFAULT '[\"push\"]'")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # nudge_last_batch_at: Timestamp of last batch send (for interval enforcement)
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN nudge_last_batch_at TIMESTAMP")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # nudge_batch_channel: Channel for batch nudges (defaults to 'push')
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN nudge_batch_channel TEXT DEFAULT 'push'")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # nudge_drip_interval_minutes: How often to send drip nudges
@@ -439,18 +439,18 @@ def init_db() -> None:
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN slack_excluded_channels TEXT")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # telegram_excluded_chats: JSON array of Telegram chat IDs to exclude from scanner
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN telegram_excluded_chats TEXT")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # Migration: Add user_response column to nudges table
@@ -458,9 +458,9 @@ def init_db() -> None:
         try:
             cursor.execute("ALTER TABLE nudges ADD COLUMN user_response TEXT")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # Migration: Add scanner interval preferences
@@ -468,33 +468,33 @@ def init_db() -> None:
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN scanner_gmail_interval_minutes INTEGER DEFAULT 15")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN scanner_slack_interval_minutes INTEGER DEFAULT 120")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN scanner_telegram_interval_minutes INTEGER DEFAULT 5")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN scanner_calendar_interval_minutes INTEGER DEFAULT 60")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # Migration: Add classification tier preference
@@ -502,9 +502,9 @@ def init_db() -> None:
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN classification_tier TEXT DEFAULT 'haiku'")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # Migration: Add bot_token and bot_user_id to slack_tokens
@@ -512,17 +512,17 @@ def init_db() -> None:
         try:
             cursor.execute("ALTER TABLE slack_tokens ADD COLUMN bot_token TEXT")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         try:
             cursor.execute("ALTER TABLE slack_tokens ADD COLUMN bot_user_id TEXT")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # Migration: Add reason + item_context columns to user_feedback
@@ -714,73 +714,73 @@ def init_db() -> None:
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN user_name TEXT DEFAULT NULL")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN user_pronouns_subject TEXT DEFAULT 'they'")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN user_pronouns_object TEXT DEFAULT 'them'")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN user_pronouns_possessive TEXT DEFAULT 'their'")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN user_context TEXT DEFAULT NULL")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN key_people TEXT DEFAULT NULL")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN key_projects TEXT DEFAULT NULL")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN priorities TEXT DEFAULT NULL")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN setup_complete INTEGER DEFAULT 0")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         # Migration: Add feature flag columns to user_settings
@@ -788,25 +788,25 @@ def init_db() -> None:
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN screen_agent_enabled INTEGER DEFAULT 0")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN browser_agent_enabled INTEGER DEFAULT 0")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         try:
             cursor.execute("ALTER TABLE user_settings ADD COLUMN personality_casual INTEGER DEFAULT 0")
         except Exception as e:
-            if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower() \
-                    and "does not exist" not in str(e).lower() and "undefined" not in str(e).lower() \
-                    and "no such table" not in str(e).lower():
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
                 raise
 
         timings['migrations'] = time.time() - section_start
