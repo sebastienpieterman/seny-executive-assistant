@@ -76,6 +76,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(() => {
+    // Fire-and-forget: call backend to blocklist the token
+    // Uses raw fetch (not api client) to avoid 401 redirect race condition
+    const currentToken = localStorage.getItem(TOKEN_KEY);
+    if (currentToken) {
+      fetch("/api/auth/logout", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${currentToken}`,
+          "Content-Type": "application/json",
+        },
+      }).catch(() => {
+        // Silently ignore — local logout proceeds regardless
+      });
+    }
+
+    // Immediately clear local state (don't await the API call)
     localStorage.removeItem(TOKEN_KEY);
     setToken(null);
   }, []);
