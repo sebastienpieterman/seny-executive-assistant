@@ -65,8 +65,8 @@ class MessageResponse(BaseModel):
     message: str
 
 
-@limiter.limit("5/hour")
 @router.post("/register", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("5/hour")
 async def register(request: Request, body: RegisterRequest):
     """
     Register a new user.
@@ -109,8 +109,8 @@ async def register(request: Request, body: RegisterRequest):
     return MessageResponse(message="User created successfully")
 
 
-@limiter.limit("10/minute")
 @router.post("/login", response_model=AuthResponse)
+@limiter.limit("10/minute")
 async def login(request: Request, body: LoginRequest):
     """
     Authenticate a user and generate JWT token.
@@ -168,8 +168,8 @@ async def login(request: Request, body: LoginRequest):
     return AuthResponse(access_token=access_token, token_type="bearer")
 
 
-@limiter.limit("5/hour")
 @router.post("/desktop-token", response_model=AuthResponse)
+@limiter.limit("5/hour")
 async def generate_desktop_token(request: Request, user_id: str = Depends(require_auth)):
     """
     Generate a permanent token for the desktop app.
