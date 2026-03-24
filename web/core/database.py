@@ -833,6 +833,15 @@ def init_db() -> None:
                     and "undefined" not in str(e).lower():
                 raise
 
+        # Phase 14-01: Daily classification limit for API cost control
+        try:
+            cursor.execute("ALTER TABLE user_settings ADD COLUMN daily_classification_limit INTEGER DEFAULT 200")
+        except Exception as e:
+            if "already exists" not in str(e).lower() \
+                    and "does not exist" not in str(e).lower() \
+                    and "undefined" not in str(e).lower():
+                raise
+
         timings['migrations'] = time.time() - section_start
         print(f"[INIT_DB] Migrations: {timings['migrations']:.2f}s")
         # ============================================================================
@@ -9145,6 +9154,23 @@ _scanner_prefs_logging = __import__('logging')
 _scanner_prefs_logger = _scanner_prefs_logging.getLogger(__name__)
 
 
+def get_daily_classification_count(user_id: int) -> int:
+    """Count today's classifications from item_classifications table."""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*) as count
+                FROM item_classifications
+                WHERE user_id = %s AND classified_at >= CURRENT_DATE
+            """, (user_id,))
+            row = cursor.fetchone()
+            return row["count"] if row else 0
+    except Exception as e:
+        _scanner_prefs_logger.error("Error counting daily classifications: %s", repr(e))
+        return 0
+
+
 def get_scanner_preferences(user_id: int) -> dict:
     """
     Get scanner preferences for a user.
@@ -9162,7 +9188,8 @@ def get_scanner_preferences(user_id: int) -> dict:
                    scanner_slack_interval_minutes,
                    scanner_telegram_interval_minutes,
                    scanner_calendar_interval_minutes,
-                   classification_tier
+                   classification_tier,
+                   daily_classification_limit
             FROM user_settings
             WHERE user_id = %s
         """, (user_id,))
@@ -9176,6 +9203,7 @@ def get_scanner_preferences(user_id: int) -> dict:
                 'scanner_telegram_interval_minutes': row['scanner_telegram_interval_minutes'] or 5,
                 'scanner_calendar_interval_minutes': row['scanner_calendar_interval_minutes'] or 60,
                 'classification_tier': row['classification_tier'] or 'haiku',
+                'daily_classification_limit': row['daily_classification_limit'] if row['daily_classification_limit'] is not None else 200,
             }
 
         # Default values if no user_settings row
@@ -9185,6 +9213,7 @@ def get_scanner_preferences(user_id: int) -> dict:
             'scanner_telegram_interval_minutes': 5,
             'scanner_calendar_interval_minutes': 60,
             'classification_tier': 'haiku',
+            'daily_classification_limit': 200,
         }
 
 
@@ -9194,7 +9223,8 @@ def update_scanner_preferences(
     scanner_slack_interval_minutes: Optional[int] = None,
     scanner_telegram_interval_minutes: Optional[int] = None,
     scanner_calendar_interval_minutes: Optional[int] = None,
-    classification_tier: Optional[str] = None
+    classification_tier: Optional[str] = None,
+    daily_classification_limit: Optional[int] = None
 ) -> bool:
     """
     Update scanner preferences for a user.
@@ -9206,6 +9236,7 @@ def update_scanner_preferences(
         scanner_telegram_interval_minutes: Telegram scan interval (5-1440 minutes)
         scanner_calendar_interval_minutes: Calendar scan interval (5-1440 minutes)
         classification_tier: 'haiku' or 'full'
+        daily_classification_limit: Max classifications per day (0 = unlimited)
 
     Returns:
         True if updated successfully
@@ -9244,6 +9275,10 @@ def update_scanner_preferences(
             if classification_tier is not None:
                 updates.append("classification_tier = %s")
                 params.append(classification_tier)
+
+            if daily_classification_limit is not None:
+                updates.append("daily_classification_limit = %s")
+                params.append(daily_classification_limit)
 
             if not updates:
                 return True  # Nothing to update
