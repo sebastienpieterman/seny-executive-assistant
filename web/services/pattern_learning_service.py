@@ -121,7 +121,7 @@ class PatternLearningService:
                 # Query nudges where user responded positively
                 # Extract hour from sent_at, count occurrences
                 cursor.execute("""
-                    SELECT CAST(strftime('%H', sent_at) AS INTEGER) as hour,
+                    SELECT EXTRACT(HOUR FROM sent_at)::INTEGER as hour,
                            COUNT(*) as count
                     FROM nudges
                     WHERE user_id = %s

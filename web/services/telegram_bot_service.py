@@ -15,6 +15,7 @@ Usage:
 """
 
 import os
+import time
 import logging
 from typing import Optional
 
@@ -24,6 +25,60 @@ logger = logging.getLogger(__name__)
 
 # Telegram Bot API base URL
 TELEGRAM_BOT_API = "https://api.telegram.org"
+
+
+# ---------------------------------------------------------------------------
+# Bot API circuit breaker (Phase 83-02)
+# Prevents retry storms when Telegram rate-limits the bot token.
+# Key: identifier string (currently just "bot" since there is one global token)
+# ---------------------------------------------------------------------------
+_CIRCUIT_FAILURE_THRESHOLD = 3
+_CIRCUIT_RECOVERY_SECONDS = 3600  # 1 hour
+_bot_circuit: dict[str, dict] = {}
+
+
+def _check_bot_circuit(identifier: str) -> bool:
+    """Return True if circuit is open (API calls should be skipped)."""
+    state = _bot_circuit.get(identifier)
+    if not state:
+        return False
+    if state["failures"] < _CIRCUIT_FAILURE_THRESHOLD:
+        return False
+    elapsed = time.time() - state["opened_at"]
+    if elapsed >= _CIRCUIT_RECOVERY_SECONDS:
+        # Recovery window passed, reset circuit so we try again
+        _bot_circuit.pop(identifier, None)
+        return False
+    return True  # Circuit open
+
+
+def _record_bot_failure(identifier: str, error="") -> None:
+    """Increment failure count; open circuit after threshold."""
+    state = _bot_circuit.setdefault(identifier, {"failures": 0, "opened_at": None})
+    state["failures"] += 1
+    failure_count = state["failures"]
+    if failure_count >= _CIRCUIT_FAILURE_THRESHOLD:
+        state["opened_at"] = time.time()
+        logger.warning(
+            "Bot API circuit open for %s, skipping calls for %d min",
+            identifier, _CIRCUIT_RECOVERY_SECONDS // 60
+        )
+        if failure_count == _CIRCUIT_FAILURE_THRESHOLD:
+            try:
+                from web.services.integration_alerts import schedule_token_alert
+                schedule_token_alert(0, "telegram_bot", identifier)
+            except Exception:
+                pass
+    else:
+        logger.error(
+            "Bot API call failed (%s): %s, circuit failure %d/%d",
+            identifier, repr(error), failure_count, _CIRCUIT_FAILURE_THRESHOLD
+        )
+
+
+def _reset_bot_circuit(identifier: str) -> None:
+    """Reset circuit after a successful API call."""
+    _bot_circuit.pop(identifier, None)
 
 
 class TelegramBotService:
@@ -69,6 +124,10 @@ class TelegramBotService:
         if not self.is_configured():
             return {"ok": False, "error": "bot_not_configured"}
 
+        # Circuit breaker check (Phase 83-02)
+        if _check_bot_circuit("bot"):
+            return {"ok": False, "error": "circuit_open"}
+
         url = self._api_url(method)
 
         try:
@@ -83,15 +142,22 @@ class TelegramBotService:
                 if not data.get("ok"):
                     error_desc = data.get("description", "Unknown error")
                     logger.error(f"Telegram Bot API error ({method}): {error_desc}")
+                    # Only trip circuit on rate limits (429 / Too Many Requests)
+                    if response.status_code == 429 or "429" in error_desc or "Too Many Requests" in error_desc:
+                        _record_bot_failure("bot", error_desc)
                     return {"ok": False, "error": error_desc}
 
+                # Success: reset circuit
+                _reset_bot_circuit("bot")
                 return data
 
         except httpx.TimeoutException:
             logger.warning(f"Telegram Bot API timeout ({method})")
+            _record_bot_failure("bot", "timeout")
             return {"ok": False, "error": "timeout"}
         except Exception as e:
             logger.error(f"Telegram Bot API error ({method}): {repr(e)}")
+            _record_bot_failure("bot", e)
             return {"ok": False, "error": repr(e)}
 
     async def get_bot_info(self) -> dict:

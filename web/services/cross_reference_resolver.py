@@ -397,9 +397,9 @@ class CrossReferenceResolver:
                 cursor.execute("""
                     SELECT i.id, i.title
                     FROM ideas i
-                    WHERE (i.title ILIKE %s OR i.content ILIKE %s) AND i.user_id = %s
+                    WHERE (i.title ILIKE %s OR i.summary ILIKE %s OR i.notes ILIKE %s) AND i.user_id = %s
                     LIMIT 3
-                """, (ilike_pattern, ilike_pattern, self.user_id))
+                """, (ilike_pattern, ilike_pattern, ilike_pattern, self.user_id))
 
                 for row in cursor.fetchall():
                     ref_id = insert_cross_reference(

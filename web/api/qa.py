@@ -25,7 +25,6 @@ from web.core.database import create_pending_action, get_db, insert_scanned_item
 from web.core.scheduler import (
     compute_user_patterns,
     process_batch_nudges,
-    process_calendar_event_nudges,
     process_daily_digests,
     process_drip_nudges,
     process_meeting_prep,
@@ -35,7 +34,8 @@ from web.core.scheduler import (
     process_urgent_nudges,
     process_weekly_reviews,
     send_pending_action_notifications,
-    sync_upcoming_calendar_nudges,
+    sync_calendar_reminders,
+    fire_calendar_reminders,
 )
 from web.services.email_draft_scanner import process_email_draft_proposals
 from web.services.nightly_research_service import NightlyResearchService
@@ -65,8 +65,8 @@ JOBS: dict[str, object] = {
     "drip-nudges": process_drip_nudges,
     "urgent-nudges": process_urgent_nudges,
     "batch-nudges": process_batch_nudges,
-    "calendar-nudge-sync": sync_upcoming_calendar_nudges,
-    "calendar-nudge-processor": process_calendar_event_nudges,
+    "calendar-reminder-sync": sync_calendar_reminders,
+    "calendar-reminder-fire": fire_calendar_reminders,
     "email-draft-scanner": process_email_draft_proposals,
     "pending-action-notifications": send_pending_action_notifications,
     "people-auto-tracker": process_people_auto_tracker,
@@ -428,7 +428,7 @@ async def inject_calendar_event_nudge(user_id: int = Depends(require_auth)):
     Insert 3 calendar_event_nudge rows (offsets -240, -60, -15 minutes) all immediately due.
     Uses event_id prefix 'qa_calendar_test_' for cleanup identification.
 
-    Offsets mirror the real sync job (_build_nudge_sequence):
+    Offsets mirror the real sync job (CalendarReminderService):
       -240 → "In 4 hours" nudge
       -60  → "1 hour" nudge
       -15  → "15 min" nudge

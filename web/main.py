@@ -26,6 +26,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 print("SENY STARTUP: Imported FastAPI middleware", flush=True)
 
+import logging
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from web.core.rate_limit import limiter

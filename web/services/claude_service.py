@@ -178,9 +178,12 @@ class ClaudeService:
                 # Add email tools if user has connected Gmail
                 connected_accounts = GmailService.list_connected_accounts(user_id)
                 if connected_accounts:
+                    account_emails = [a['email'] for a in connected_accounts]
+                    account_list_str = ', '.join(account_emails)
+                    account_desc = f'Gmail account to use. Connected accounts: {account_list_str}. Defaults to {account_emails[0]} if not specified. When the user mentions a specific account or the email could be on a non-default account, specify the correct one.'
                     tools.append({
                         'name': 'email_search',
-                        'description': "Search the user's Gmail using Gmail query syntax. Returns email summaries (sender, subject, snippet, date). IMPORTANT: By default, use 'in:inbox' prefix to search only the primary inbox. Without 'in:inbox', queries search ALL mail including Promotions, Social, Updates tabs, and spam. Examples: 'in:inbox is:unread' (unread in inbox only), 'in:inbox from:boss@company.com' (inbox emails from boss), 'is:unread' (ALL unread mail everywhere), 'from:sender@email.com', 'subject:meeting', 'has:attachment', 'after:2025/01/01'.",
+                        'description': f"Search the user's Gmail using Gmail query syntax. Returns email summaries (sender, subject, snippet, date). The user has {len(account_emails)} connected account(s): {account_list_str}. If the user asks about an email that might be on a specific account, search that account. IMPORTANT: By default, use 'in:inbox' prefix to search only the primary inbox. Without 'in:inbox', queries search ALL mail including Promotions, Social, Updates tabs, and spam. Examples: 'in:inbox is:unread' (unread in inbox only), 'in:inbox from:boss@company.com' (inbox emails from boss), 'is:unread' (ALL unread mail everywhere), 'from:sender@email.com', 'subject:meeting', 'has:attachment', 'after:2025/01/01'.",
                         'input_schema': {
                             'type': 'object',
                             'properties': {
@@ -194,7 +197,7 @@ class ClaudeService:
                                 },
                                 'email_account': {
                                     'type': 'string',
-                                    'description': 'Gmail account to search (optional, uses first connected account if not specified)'
+                                    'description': account_desc
                                 }
                             },
                             'required': ['query']
@@ -212,7 +215,7 @@ class ClaudeService:
                                 },
                                 'email_account': {
                                     'type': 'string',
-                                    'description': 'Gmail account to read from (optional, uses first connected account if not specified)'
+                                    'description': account_desc
                                 }
                             },
                             'required': ['message_id']
@@ -250,7 +253,7 @@ class ClaudeService:
                                 },
                                 'email_account': {
                                     'type': 'string',
-                                    'description': 'Gmail account to send from (optional, uses first connected account if not specified)'
+                                    'description': account_desc
                                 }
                             },
                             'required': ['to', 'subject', 'body']
@@ -452,6 +455,8 @@ Only call this tool AFTER the user confirms.""",
                         'name': 'note_create',
                         'description': """Create a new note. Use this when the user wants to save information, jot something down, or create a note.
 
+BEFORE CREATING: You MUST first call note_search to check if a note on this subject already exists. If a related note exists, use note_update to APPEND to it instead of creating a duplicate. Only create a new note if no existing note covers this subject. If you're unsure whether to create or update, ask the user.
+
 Use #tags inline in the content to categorize (e.g., #project #meeting #idea).
 Use [[Note Title]] to link to other existing notes.
 
@@ -513,7 +518,9 @@ Examples: "What notes do I have about...", "Find my notes on...", "Search my not
                     })
                     tools.append({
                         'name': 'note_update',
-                        'description': "Update an existing note. Provide only the fields you want to change. Tags and links will be automatically re-parsed from the new content.",
+                        'description': """Update an existing note. Provide only the fields you want to change. Tags and links will be automatically re-parsed from the new content.
+
+CRITICAL -- NON-DESTRUCTIVE EDITS ONLY: NEVER remove, delete, or replace existing content unless the user EXPLICITLY asks you to delete something. Notes are memory -- treat them as append-only logs. When adding new information, APPEND it to the appropriate section. Do NOT restructure, reorganize, or rewrite existing content. If the user asks to "add" something, that means append -- not rewrite the whole note.""",
                         'input_schema': {
                             'type': 'object',
                             'properties': {
@@ -3652,37 +3659,7 @@ content_json shapes:
                                 if event.get('html_link'):
                                     tool_result += f"\n[View in Google Calendar]({event['html_link']})"
                                 tool_result += f"\n\n**REMEMBER:** If the user wants to update or delete this event later, use event ID `{event['id']}`. Do NOT use calendar_list to find it - events far in the future won't appear there."
-                                # Schedule nudge sequence immediately (fast-path, don't wait for daily sync)
-                                try:
-                                    from web.core.database import (
-                                        has_event_nudge_sequence, schedule_event_nudge_sequence,
-                                        get_db as _get_db
-                                    )
-                                    from web.core.scheduler import _build_nudge_sequence
-                                    import json as _json
-                                    _event_id = event.get('id', '')
-                                    if _event_id and not has_event_nudge_sequence(user_id, _event_id):
-                                        with _get_db() as _db:
-                                            _cur = _db.cursor()
-
-                                            _cur.execute(
-                                                "SELECT digest_timezone, day_start_hour FROM user_settings WHERE user_id=%s",
-                                                (user_id,)
-                                            )
-
-                                            _s = _cur.fetchone()
-                                        _tz = (_s['digest_timezone'] if _s else None) or 'America/Chicago'
-                                        _dsh = (_s['day_start_hour'] if _s else None) or 15
-                                        _start = event.get('start', '') or start_time
-                                        _end = event.get('end') or end_time
-                                        _is_all_day = 'T' not in str(_start) and len(str(_start)) == 10
-                                        _att = event.get('attendees', [])
-                                        _att_json = _json.dumps([a.get('email','') for a in _att]) if _att else None
-                                        _rows = _build_nudge_sequence(_event_id, summary, str(_start), str(_end) if _end else None, _is_all_day, _tz, _dsh)
-                                        if _rows:
-                                            schedule_event_nudge_sequence(user_id, _event_id, summary, str(_start), str(_end) if _end else None, _is_all_day, _att_json, description, _rows)
-                                except Exception as _e:
-                                    logger.warning("calendar nudge schedule failed: %s", repr(_e))
+                                # Calendar reminders are handled automatically by sync_calendar_reminders (Phase 86)
                             elif event and event.get('error'):
                                 error_msg = event.get('message', 'Unknown error')
                                 status = event.get('status')
@@ -3737,29 +3714,7 @@ content_json shapes:
                                     tool_result += f"**Where:** {event['location']}\n"
                                 tool_result += f"**Calendar:** {calendar_accounts[0]['email']}\n"
                                 tool_result += f"**Event ID:** {event['id']}"
-                                # Reschedule nudge sequence if start time changed
-                                try:
-                                    _new_start = updates.get('start_time')
-                                    if _new_start:  # start_time param means time was explicitly changed
-                                        from web.core.database import cancel_event_nudge_sequence, has_event_nudge_sequence, schedule_event_nudge_sequence, get_db as _get_db
-                                        from web.core.scheduler import _build_nudge_sequence
-                                        cancel_event_nudge_sequence(user_id, event_id)
-                                        with _get_db() as _db:
-                                            _cur = _db.cursor()
-
-                                            _cur.execute("SELECT digest_timezone, day_start_hour FROM user_settings WHERE user_id=%s", (user_id,))
-
-                                            _s = _cur.fetchone()
-                                        _tz = (_s['digest_timezone'] if _s else None) or 'America/Chicago'
-                                        _dsh = (_s['day_start_hour'] if _s else None) or 15
-                                        _new_end = updates.get('end_time')
-                                        _new_summary = updates.get('summary') or event_id
-                                        _is_all_day = 'T' not in _new_start and len(_new_start) == 10
-                                        _rows = _build_nudge_sequence(event_id, _new_summary, _new_start, _new_end, _is_all_day, _tz, _dsh)
-                                        if _rows:
-                                            schedule_event_nudge_sequence(user_id, event_id, _new_summary, _new_start, _new_end, _is_all_day, None, None, _rows)
-                                except Exception as _e:
-                                    logger.warning("calendar nudge reschedule failed: %s", repr(_e))
+                                # Calendar reminders are handled automatically by sync_calendar_reminders (Phase 86)
                             elif event and event.get('error'):
                                 error_msg = event.get('message', 'Unknown error')
                                 status = event.get('status')
@@ -7327,26 +7282,7 @@ content_json shapes:
                                         tool_result += f"Start: {event.get('start', start_time)}\n"
                                         tool_result += f"End: {event.get('end', end_time)}\n"
                                         tool_result += f"Event ID: {event.get('id', 'N/A')}"
-                                        # Schedule nudge sequence (fast-path)
-                                        try:
-                                            from web.core.database import has_event_nudge_sequence, schedule_event_nudge_sequence, get_db as _get_db
-                                            from web.core.scheduler import _build_nudge_sequence
-                                            _event_id = event.get('id', '')
-                                            if _event_id and not has_event_nudge_sequence(user_id, _event_id):
-                                                with _get_db() as _db:
-                                                    _cur = _db.cursor()
-
-                                                    _cur.execute("SELECT digest_timezone, day_start_hour FROM user_settings WHERE user_id=%s", (user_id,))
-
-                                                    _s = _cur.fetchone()
-                                                _tz = (_s['digest_timezone'] if _s else None) or 'America/Chicago'
-                                                _dsh = (_s['day_start_hour'] if _s else None) or 15
-                                                _is_all_day = 'T' not in start_time and len(start_time) == 10
-                                                _rows = _build_nudge_sequence(_event_id, summary, start_time, end_time, _is_all_day, _tz, _dsh)
-                                                if _rows:
-                                                    schedule_event_nudge_sequence(user_id, _event_id, summary, start_time, end_time, _is_all_day, None, description, _rows)
-                                        except Exception as _e:
-                                            logger.warning("outlook calendar nudge schedule failed: %s", repr(_e))
+                                        # Calendar reminders handled by sync_calendar_reminders (Phase 86)
                                     else:
                                         tool_result = "Failed to create event. Please try again."
                         except Exception as e:
@@ -7394,26 +7330,7 @@ content_json shapes:
                                         tool_result += f"**{event.get('subject', '')}**\n"
                                         tool_result += f"Start: {event.get('start', '')}\n"
                                         tool_result += f"End: {event.get('end', '')}"
-                                        # Reschedule nudge sequence if start time changed
-                                        try:
-                                            if start_time:  # start_time param means time was explicitly changed
-                                                from web.core.database import cancel_event_nudge_sequence, has_event_nudge_sequence, schedule_event_nudge_sequence, get_db as _get_db
-                                                from web.core.scheduler import _build_nudge_sequence
-                                                cancel_event_nudge_sequence(user_id, event_id)
-                                                with _get_db() as _db:
-                                                    _cur = _db.cursor()
-
-                                                    _cur.execute("SELECT digest_timezone, day_start_hour FROM user_settings WHERE user_id=%s", (user_id,))
-
-                                                    _s = _cur.fetchone()
-                                                _tz = (_s['digest_timezone'] if _s else None) or 'America/Chicago'
-                                                _dsh = (_s['day_start_hour'] if _s else None) or 15
-                                                _is_all_day = 'T' not in start_time and len(start_time) == 10
-                                                _rows = _build_nudge_sequence(event_id, summary or event_id, start_time, end_time, _is_all_day, _tz, _dsh)
-                                                if _rows:
-                                                    schedule_event_nudge_sequence(user_id, event_id, summary or event_id, start_time, end_time, _is_all_day, None, None, _rows)
-                                        except Exception as _e:
-                                            logger.warning("outlook calendar nudge reschedule failed: %s", repr(_e))
+                                        # Calendar reminders handled by sync_calendar_reminders (Phase 86)
                                     else:
                                         tool_result = f"Failed to update event {event_id}."
                         except Exception as e:

@@ -23,8 +23,10 @@ Usage:
 """
 
 import asyncio
+import functools
 import logging
 import os
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -42,92 +44,358 @@ scheduler: Optional[AsyncIOScheduler] = None
 _STARTUP_TIME: Optional[datetime] = None
 
 
-def _build_nudge_sequence(
-    event_id: str,
-    event_title: str,
-    event_start: str,
-    event_end: Optional[str],
-    is_all_day: bool,
-    user_timezone: str,
-    day_start_hour: int = 15,
-) -> list:
+def _with_duration_log(job_name: str, interval_seconds: int):
+    """Decorator that wraps async scheduler jobs with duration logging and error handling.
+
+    Logs completion time, warns when a job approaches its scheduling interval,
+    and catches all exceptions (logging them without re-raising so APScheduler
+    does not double-log).
     """
-    Compute the scheduled_for timestamps for a calendar event nudge sequence.
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            start = time.monotonic()
+            try:
+                await func(*args, **kwargs)
+            except Exception as e:
+                duration = time.monotonic() - start
+                print(f"[JOB] {job_name} FAILED after {duration:.1f}s: {repr(e)}", flush=True)
+                logger.error(f"{job_name} failed after {duration:.1f}s: {repr(e)}")
+                return
+            duration = time.monotonic() - start
+            print(f"[JOB] {job_name} completed in {duration:.1f}s", flush=True)
+            if duration > interval_seconds * 0.5:
+                print(f"[JOB] WARNING: {job_name} took {duration:.1f}s, approaching {interval_seconds}s interval", flush=True)
+                logger.warning(f"{job_name} took {duration:.1f}s, approaching {interval_seconds}s interval")
+        return wrapper
+    return decorator
 
-    Timed events:  -240 min (4h), -60 min (1h), -15 min, +15 min (grace)
-    All-day events: -2 days at day_start_hour, -1 day at day_start_hour, day-of at day_start_hour
-    All past timestamps are skipped.
 
-    Returns list of {offset_minutes, scheduled_for (UTC ISO string)} dicts.
+# ---------------------------------------------------------------------------
+# Calendar Reminder System (Phase 86)
+# Replaces old nudge-based calendar system with independent direct delivery.
+# ---------------------------------------------------------------------------
+
+_cr_columns_ensured = False
+
+
+def _ensure_calendar_reminder_columns():
+    """Idempotent ALTER TABLE to add source, telegram_message_id, acknowledged columns."""
+    global _cr_columns_ensured
+    if _cr_columns_ensured:
+        return
+    from web.core.database import get_db
+    try:
+        with get_db() as db:
+            cursor = db.cursor()
+            try:
+                cursor.execute("""
+                    ALTER TABLE calendar_event_nudges
+                    ADD COLUMN IF NOT EXISTS source TEXT DEFAULT NULL
+                """)
+            except Exception:
+                pass
+            try:
+                cursor.execute("""
+                    ALTER TABLE calendar_event_nudges
+                    ADD COLUMN IF NOT EXISTS telegram_message_id BIGINT DEFAULT NULL
+                """)
+            except Exception:
+                pass
+            try:
+                cursor.execute("""
+                    ALTER TABLE calendar_event_nudges
+                    ADD COLUMN IF NOT EXISTS acknowledged BOOLEAN DEFAULT FALSE
+                """)
+            except Exception:
+                pass
+            db.commit()
+        _cr_columns_ensured = True
+        logger.info("calendar_event_nudges columns ensured")
+    except Exception as e:
+        logger.warning("_ensure_calendar_reminder_columns: %s", repr(e))
+
+
+_legacy_nudges_cancelled = False
+
+
+def _cancel_legacy_calendar_nudges():
+    """One-time cleanup: cancel pending old-system calendar_event_nudges entries."""
+    global _legacy_nudges_cancelled
+    if _legacy_nudges_cancelled:
+        return
+    from web.core.database import get_db
+    try:
+        with get_db() as db:
+            cursor = db.cursor()
+            cursor.execute("""
+                UPDATE calendar_event_nudges
+                SET status = 'cancelled', dismiss_reason = 'migrated_to_calendar_reminder_system'
+                WHERE status = 'pending'
+                  AND (source IS NULL OR source != 'calendar_reminder')
+            """)
+            count = cursor.rowcount
+            db.commit()
+        _legacy_nudges_cancelled = True
+        if count:
+            logger.info("_cancel_legacy_calendar_nudges: cancelled %d old-system pending entries", count)
+    except Exception as e:
+        logger.warning("_cancel_legacy_calendar_nudges: %s", repr(e))
+
+
+def _has_calendar_reminder_sequence(user_id: int, event_id: str) -> bool:
+    from web.core.database import get_db
+    try:
+        with get_db() as db:
+            cursor = db.cursor()
+            cursor.execute("""
+                SELECT COUNT(*) FROM calendar_event_nudges
+                WHERE user_id = %s AND event_id = %s AND status != 'cancelled'
+                  AND source = 'calendar_reminder'
+            """, (user_id, event_id))
+            row = cursor.fetchone()
+            return (next(iter(row.values())) > 0) if row else False
+    except Exception as e:
+        logger.error("_has_calendar_reminder_sequence error: %s", repr(e))
+        return False
+
+
+def _schedule_calendar_reminder_sequence(
+    user_id, event_id, event_title, event_start, event_end,
+    is_all_day, attendees_json, description, nudge_rows,
+) -> bool:
+    from web.core.database import get_db
+    if _has_calendar_reminder_sequence(user_id, event_id):
+        return False
+    try:
+        with get_db() as db:
+            cursor = db.cursor()
+            for row in nudge_rows:
+                cursor.execute("""
+                    INSERT INTO calendar_event_nudges
+                        (user_id, event_id, event_title, event_start, event_end,
+                         event_attendees, event_description, is_all_day,
+                         offset_minutes, scheduled_for, status, source)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', 'calendar_reminder')
+                """, (
+                    user_id, event_id, event_title, event_start, event_end,
+                    attendees_json, description, 1 if is_all_day else 0,
+                    row['offset_minutes'], row['scheduled_for'],
+                ))
+            db.commit()
+            return True
+    except Exception as e:
+        logger.error("_schedule_calendar_reminder_sequence error: %s", repr(e))
+        return False
+
+
+def _get_pending_calendar_reminder_sequences(user_id: int) -> list:
+    from web.core.database import get_db
+    try:
+        with get_db() as db:
+            cursor = db.cursor()
+            cursor.execute("""
+                SELECT DISTINCT event_id, event_start, event_title
+                FROM calendar_event_nudges
+                WHERE user_id = %s AND status = 'pending' AND source = 'calendar_reminder'
+            """, (user_id,))
+            return [dict(r) for r in cursor.fetchall()]
+    except Exception as e:
+        logger.error("_get_pending_calendar_reminder_sequences error: %s", repr(e))
+        return []
+
+
+def _cancel_calendar_reminder_sequence(user_id: int, event_id: str) -> int:
+    from web.core.database import get_db
+    try:
+        with get_db() as db:
+            cursor = db.cursor()
+            cursor.execute("""
+                UPDATE calendar_event_nudges
+                SET status = 'cancelled'
+                WHERE user_id = %s AND event_id = %s AND status = 'pending'
+                  AND source = 'calendar_reminder'
+            """, (user_id, event_id))
+            db.commit()
+            return cursor.rowcount
+    except Exception as e:
+        logger.error("_cancel_calendar_reminder_sequence error: %s", repr(e))
+        return 0
+
+
+def _get_due_calendar_reminders() -> list:
+    from web.core.database import get_db
+    try:
+        with get_db() as db:
+            cursor = db.cursor()
+            cursor.execute("""
+                SELECT * FROM calendar_event_nudges
+                WHERE status = 'pending'
+                  AND source = 'calendar_reminder'
+                  AND scheduled_for::timestamp <= NOW()
+                ORDER BY scheduled_for ASC
+            """)
+            return [dict(r) for r in cursor.fetchall()]
+    except Exception as e:
+        logger.error("_get_due_calendar_reminders error: %s", repr(e))
+        return []
+
+
+def _mark_calendar_reminder_sent(row_id: int, channel: str, telegram_message_id: int = None):
+    from web.core.database import get_db
+    try:
+        with get_db() as db:
+            cursor = db.cursor()
+            if telegram_message_id:
+                cursor.execute("""
+                    UPDATE calendar_event_nudges
+                    SET status = 'sent', telegram_message_id = %s
+                    WHERE id = %s
+                """, (telegram_message_id, row_id))
+            else:
+                cursor.execute("""
+                    UPDATE calendar_event_nudges
+                    SET status = 'sent'
+                    WHERE id = %s
+                """, (row_id,))
+            db.commit()
+    except Exception as e:
+        logger.error("_mark_calendar_reminder_sent error row=%s: %s", row_id, repr(e))
+
+
+def _mark_calendar_reminder_cancelled(row_id: int, reason: str = ''):
+    from web.core.database import get_db
+    try:
+        with get_db() as db:
+            cursor = db.cursor()
+            cursor.execute("""
+                UPDATE calendar_event_nudges
+                SET status = 'cancelled'
+                WHERE id = %s
+            """, (row_id,))
+            db.commit()
+    except Exception as e:
+        logger.error("_mark_calendar_reminder_cancelled error row=%s: %s", row_id, repr(e))
+
+
+def _check_calendar_reminder_acknowledged(user_id: int, event_id: str) -> bool:
+    from web.core.database import get_db
+    try:
+        with get_db() as db:
+            cursor = db.cursor()
+            cursor.execute("""
+                SELECT COUNT(*) FROM calendar_event_nudges
+                WHERE user_id = %s AND event_id = %s
+                  AND source = 'calendar_reminder'
+                  AND acknowledged = TRUE
+            """, (user_id, event_id))
+            row = cursor.fetchone()
+            return (next(iter(row.values())) > 0) if row else False
+    except Exception as e:
+        logger.warning("_check_calendar_reminder_acknowledged error: %s", repr(e))
+        return False
+
+
+def _cr_extract_start(event: dict) -> str:
+    val = event.get('start', {})
+    if isinstance(val, dict):
+        return val.get('dateTime') or val.get('date') or ''
+    return str(val) if val else ''
+
+
+def _cr_extract_end(event: dict) -> str:
+    val = event.get('end', {})
+    if isinstance(val, dict):
+        return val.get('dateTime') or val.get('date') or ''
+    return str(val) if val else ''
+
+
+async def _deliver_calendar_reminder(user_id: int, title: str, body: str):
+    """Deliver calendar reminder with fallback chain: Telegram -> Slack -> Push."""
+    # --- Try 1: Telegram bot DM ---
+    try:
+        from web.core.database import get_telegram_bot_user_links_for_user
+        from web.services.telegram_bot_service import TelegramBotService
+
+        links = get_telegram_bot_user_links_for_user(user_id)
+        if links:
+            chat_id = links[0]["telegram_chat_id"]
+            bot = TelegramBotService()
+            if bot.is_configured():
+                message = f"*{title}*"
+                if body:
+                    message += f"\n{body}"
+                result = await bot.send_message(chat_id, message)
+                if result and not result.get("error"):
+                    msg_id = result.get("message_id")
+                    logger.info("Calendar reminder delivered via Telegram to user %d (msg_id=%s)", user_id, msg_id)
+                    return True, 'telegram', msg_id
+    except Exception as e:
+        logger.warning("Calendar reminder Telegram delivery failed for user %d: %s", user_id, repr(e))
+
+    # --- Try 2: Slack self-DM ---
+    try:
+        from web.core.database import get_first_slack_token
+        from web.services.slack_service import SlackService
+
+        token_data = get_first_slack_token(user_id)
+        if token_data:
+            slack = SlackService(user_id)
+            if slack.is_connected():
+                authed_user_id = token_data.get('authed_user_id')
+                if authed_user_id:
+                    open_result = await slack._api_call(
+                        "conversations.open",
+                        json_body={"users": authed_user_id}
+                    )
+                    if open_result.get('ok'):
+                        dm_channel_id = open_result.get('channel', {}).get('id')
+                        if dm_channel_id:
+                            slack_msg = f"*{title}*"
+                            if body:
+                                slack_msg += f"\n{body}"
+                            result = await slack.send_message(dm_channel_id, slack_msg)
+                            if result is not None:
+                                logger.info("Calendar reminder delivered via Slack to user %d", user_id)
+                                return True, 'slack', None
+    except Exception as e:
+        logger.warning("Calendar reminder Slack delivery failed for user %d: %s", user_id, repr(e))
+
+    # --- Try 3: Push notification ---
+    try:
+        from web.services.notification_service import NotificationService
+
+        notification = NotificationService(user_id)
+        push_body = body[:97] + '...' if body and len(body) > 100 else (body or '')
+        result = await notification.send_notification(
+            title=title, body=push_body, url="/digest", notification_type="calendar_reminder"
+        )
+        sent_count = result.get('sent', 0)
+        if sent_count > 0:
+            logger.info("Calendar reminder delivered via Push to user %d", user_id)
+            return True, 'push', None
+    except Exception as e:
+        logger.warning("Calendar reminder Push delivery failed for user %d: %s", user_id, repr(e))
+
+    logger.error("Calendar reminder delivery FAILED for user %d: all channels exhausted (title='%s')", user_id, title[:60])
+    return False, 'none', None
+
+
+@_with_duration_log("sync_calendar_reminders", 600)
+async def sync_calendar_reminders():
     """
-    tz = ZoneInfo(user_timezone)
-    now_utc = datetime.now(ZoneInfo('UTC'))
-    rows = []
-
-    if is_all_day:
-        try:
-            event_date = datetime.strptime(event_start, "%Y-%m-%d")
-        except ValueError:
-            return []
-        offsets = [
-            (-2880, event_date - timedelta(days=2)),
-            (-1440, event_date - timedelta(days=1)),
-            (0,     event_date),
-        ]
-        for offset_min, base_date in offsets:
-            fire_local = datetime(
-                base_date.year, base_date.month, base_date.day,
-                day_start_hour, 0, 0, tzinfo=tz
-            )
-            fire_utc = fire_local.astimezone(ZoneInfo('UTC'))
-            if fire_utc > now_utc:
-                rows.append({
-                    'offset_minutes': offset_min,
-                    'scheduled_for': fire_utc.strftime('%Y-%m-%dT%H:%M:%S'),
-                })
-    else:
-        try:
-            if event_start.endswith('Z'):
-                event_start = event_start[:-1] + '+00:00'
-            start_dt = datetime.fromisoformat(event_start)
-            if start_dt.tzinfo is None:
-                start_dt = start_dt.replace(tzinfo=tz)
-            start_utc = start_dt.astimezone(ZoneInfo('UTC'))
-        except ValueError:
-            return []
-        offsets = [-240, -60, -15, 15]
-        for offset_min in offsets:
-            fire_utc = start_utc + timedelta(minutes=offset_min)
-            if fire_utc > now_utc:
-                rows.append({
-                    'offset_minutes': offset_min,
-                    'scheduled_for': fire_utc.strftime('%Y-%m-%dT%H:%M:%S'),
-                })
-
-    return rows
-
-
-async def sync_upcoming_calendar_nudges():
+    Every 10 min: collect live calendar events, filter by user relationship,
+    deduplicate across accounts, reconcile against pending reminder sequences,
+    and create new sequences for events that don't have one.
     """
-    Hourly job: collect live calendar events, reconcile against pending nudge
-    sequences (cancel deleted/rescheduled), then create sequences for new events.
-
-    Three-phase flow:
-      1. COLLECT -- fetch events from all accounts (Google + Outlook) per user
-      2. RECONCILE -- cancel sequences whose event disappeared or was rescheduled
-      3. CREATE -- schedule nudge sequences for events that don't have one yet
-
-    Safety: if an API call fails for one account, that account's events are NOT
-    included in the live_events set, so we never mass-cancel due to a network blip.
-    """
-    from web.core.database import (
-        get_db, has_event_nudge_sequence, schedule_event_nudge_sequence,
-        cancel_event_nudge_sequence, get_pending_event_sequences,
-        get_nudge_preferences
-    )
+    from web.core.database import get_db, get_nudge_preferences, schedule_event_nudge_sequence
     from web.services.calendar_service import CalendarService
     from web.services.outlook_calendar_service import OutlookCalendarService
-    import json
+    from web.services.calendar_reminder_service import CalendarReminderService
+    import json as _json
+
+    _ensure_calendar_reminder_columns()
+    _cancel_legacy_calendar_nudges()
 
     try:
         with get_db() as db:
@@ -135,336 +403,249 @@ async def sync_upcoming_calendar_nudges():
             cursor.execute("SELECT id FROM users")
             users = cursor.fetchall()
     except Exception as e:
-        logger.error("sync_upcoming_calendar_nudges: DB error fetching users: %s", repr(e))
+        logger.error("sync_calendar_reminders: DB error fetching users: %s", repr(e))
         return
 
     for row in users:
         user_id = row['id']
         try:
-            # Get user timezone and day_start_hour from user_settings
-            with get_db() as db:
-                cursor = db.cursor()
-                cursor.execute(
-                    "SELECT digest_timezone, day_start_hour FROM user_settings WHERE user_id = %s",
-                    (user_id,)
-                )
-                settings_row = cursor.fetchone()
-            user_tz = (settings_row['digest_timezone'] if settings_row else None) or 'America/Chicago'
-            day_start = (settings_row['day_start_hour'] if settings_row else None) or 15
+            svc = CalendarReminderService(user_id)
+            user_emails = svc.get_all_user_emails(user_id)
+            prefs = get_nudge_preferences(user_id)
+            user_tz = prefs.get('digest_timezone') or 'America/Chicago'
 
-            # ==============================================================
-            # PHASE 1: COLLECT -- fetch all live events into a lookup dict
-            # ==============================================================
-            # live_events maps event_id -> { 'start': str, 'event': dict }
-            live_events: dict = {}
-            # Track which accounts succeeded so we only reconcile against
-            # accounts whose data we actually received.
-            successful_account_event_ids: set = set()
+            # COLLECT: fetch all live events
+            all_events = []
 
-            # --- Google Calendar ---
             try:
                 google_accounts = CalendarService.list_connected_accounts(user_id)
                 for account in google_accounts:
                     email = account['email']
                     try:
                         cal = CalendarService(user_id, email)
-                        all_calendars = await cal.get_all_calendars()
-                        nudge_calendar_ids = [
-                            c['id'] for c in all_calendars
-                            if c.get('access_role') in ('owner', 'writer')
-                        ]
-                        if not nudge_calendar_ids:
-                            continue
-                        events = await cal.get_all_events(
-                            days_ahead=14, timezone=user_tz,
-                            calendar_ids=nudge_calendar_ids
-                        )
-                        for event in events:
-                            eid = event.get('id', '')
-                            if eid:
-                                live_events[eid] = {
-                                    'start': event.get('start', ''),
-                                    'event': event,
-                                }
-                                successful_account_event_ids.add(eid)
+                        events = await cal.get_all_events(days_ahead=7, timezone=user_tz)
+                        all_events.extend(events)
                     except Exception as e:
-                        logger.error(
-                            "sync_upcoming_calendar_nudges: Google fetch error user=%s account=%s: %s",
-                            user_id, email, repr(e)
-                        )
-                        # Do NOT add this account's events -- partial failure safety
+                        logger.error("sync_calendar_reminders: Google fetch error user=%s account=%s: %s", user_id, email, repr(e))
             except Exception as e:
-                logger.error("sync_upcoming_calendar_nudges: Google accounts error user=%s: %s", user_id, repr(e))
+                logger.error("sync_calendar_reminders: Google accounts error user=%s: %s", user_id, repr(e))
 
-            # --- Outlook Calendar ---
             try:
                 outlook_accounts = OutlookCalendarService.list_connected_accounts(user_id)
                 for account in outlook_accounts:
                     email = account['email']
                     try:
                         cal = OutlookCalendarService(user_id, email)
-                        events = await cal.get_events(days_ahead=14)
-                        for event in events:
-                            eid = event.get('id', '')
-                            if eid:
-                                live_events[eid] = {
-                                    'start': event.get('start', ''),
-                                    'event': event,
-                                }
-                                successful_account_event_ids.add(eid)
+                        events = await cal.get_events(days_ahead=7)
+                        all_events.extend(events)
                     except Exception as e:
-                        logger.error(
-                            "sync_upcoming_calendar_nudges: Outlook fetch error user=%s account=%s: %s",
-                            user_id, email, repr(e)
-                        )
+                        logger.error("sync_calendar_reminders: Outlook fetch error user=%s account=%s: %s", user_id, email, repr(e))
             except Exception as e:
-                logger.error("sync_upcoming_calendar_nudges: Outlook accounts error user=%s: %s", user_id, repr(e))
+                logger.error("sync_calendar_reminders: Outlook accounts error user=%s: %s", user_id, repr(e))
 
-            # ==============================================================
-            # PHASE 2: RECONCILE -- cancel sequences for deleted/rescheduled events
-            # ==============================================================
-            if successful_account_event_ids:
-                pending = get_pending_event_sequences(user_id)
-                for seq in pending:
-                    seq_event_id = seq['event_id']
-                    seq_event_start = seq.get('event_start', '')
-                    seq_title = seq.get('event_title', '(unknown)')
+            filtered = [ev for ev in all_events if svc.is_my_event(ev, user_emails)]
+            deduped = svc.deduplicate_events(filtered)
 
-                    if seq_event_id not in live_events:
-                        # Event no longer exists -- cancelled or moved outside window
-                        cancelled_count = cancel_event_nudge_sequence(user_id, seq_event_id)
-                        if cancelled_count:
-                            logger.info(
-                                "sync_upcoming_calendar_nudges: cancelled %d nudges for DELETED event user=%s event='%s' id=%s",
-                                cancelled_count, user_id, seq_title[:40], seq_event_id
-                            )
-                    else:
-                        # Event exists -- check if start time changed (rescheduled)
-                        live_start = live_events[seq_event_id]['start']
-                        if seq_event_start and live_start and seq_event_start != live_start:
-                            cancelled_count = cancel_event_nudge_sequence(user_id, seq_event_id)
-                            if cancelled_count:
-                                logger.info(
-                                    "sync_upcoming_calendar_nudges: cancelled %d nudges for RESCHEDULED event user=%s event='%s' old_start=%s new_start=%s",
-                                    cancelled_count, user_id, seq_title[:40], seq_event_start, live_start
-                                )
+            # RECONCILE: cancel sequences for deleted/rescheduled events
+            live_lookup = {}
+            for ev in deduped:
+                title = (ev.get('summary') or ev.get('subject') or '').strip()
+                start_iso = _cr_extract_start(ev)
+                if title and start_iso:
+                    live_lookup[(title.lower(), start_iso)] = ev
 
-            # ==============================================================
-            # PHASE 3: CREATE -- schedule sequences for new events
-            # ==============================================================
-            for eid, entry in live_events.items():
-                if has_event_nudge_sequence(user_id, eid):
+            pending = _get_pending_calendar_reminder_sequences(user_id)
+            for seq in pending:
+                seq_title = (seq.get('event_title') or '').strip().lower()
+                seq_start = seq.get('event_start', '')
+                seq_event_id = seq['event_id']
+                key = (seq_title, seq_start)
+                if key not in live_lookup:
+                    cancelled = _cancel_calendar_reminder_sequence(user_id, seq_event_id)
+                    if cancelled:
+                        logger.info("sync_calendar_reminders: cancelled %d reminders for DELETED event user=%s event='%s'", cancelled, user_id, seq_title[:40])
+                else:
+                    live_ev = live_lookup[key]
+                    live_start = _cr_extract_start(live_ev)
+                    if seq_start and live_start and seq_start != live_start:
+                        cancelled = _cancel_calendar_reminder_sequence(user_id, seq_event_id)
+                        if cancelled:
+                            logger.info("sync_calendar_reminders: cancelled %d reminders for RESCHEDULED event user=%s event='%s'", cancelled, user_id, seq_title[:40])
+
+            # CREATE: schedule sequences for new events
+            tz = ZoneInfo(user_tz)
+            now_utc = datetime.now(ZoneInfo('UTC'))
+
+            for ev in deduped:
+                title = (ev.get('summary') or ev.get('subject') or 'Calendar Event').strip()
+                start_iso = _cr_extract_start(ev)
+                end_iso = _cr_extract_end(ev)
+                if not start_iso:
                     continue
 
-                event = entry['event']
-                event_start = event.get('start', '')
-                event_end = event.get('end')
+                stable_id = f"cr:{title.lower()}:{start_iso}"
+                if _has_calendar_reminder_sequence(user_id, stable_id):
+                    continue
 
-                # Detect Google vs Outlook event shape
-                if 'is_all_day' in event:
-                    # Google Calendar -- CalendarService._format_event() provides is_all_day
-                    is_all_day = event.get('is_all_day', False)
-                    title = event.get('summary', 'Calendar Event')
-                    attendees = event.get('attendees', [])
-                    attendees_json = json.dumps([a.get('email', '') for a in attendees]) if attendees else None
-                    description = event.get('description') or event.get('summary', '')
-                else:
-                    # Outlook Calendar
-                    is_all_day = 'T' not in event_start and len(event_start) == 10
-                    title = event.get('subject') or event.get('summary', 'Calendar Event')
-                    attendees = event.get('attendees', [])
-                    attendees_json = json.dumps(attendees) if attendees else None
-                    description = event.get('body') or event.get('description', '')
+                is_all_day = ev.get('is_all_day', False)
+                if not is_all_day and len(start_iso) <= 10:
+                    is_all_day = True
 
-                nudge_rows = _build_nudge_sequence(
-                    eid, title, event_start, event_end,
-                    is_all_day, user_tz, day_start
+                offsets = svc.get_reminder_offsets(is_all_day)
+                nudge_rows = []
+                for offset_min in offsets:
+                    if is_all_day:
+                        try:
+                            event_date = datetime.strptime(start_iso[:10], "%Y-%m-%d")
+                        except ValueError:
+                            continue
+                        fire_local = event_date.replace(hour=9, minute=0, second=0)
+                        fire_local = fire_local + timedelta(minutes=offset_min)
+                        fire_utc = fire_local.replace(tzinfo=tz).astimezone(ZoneInfo('UTC'))
+                    else:
+                        try:
+                            clean = start_iso.replace('Z', '+00:00')
+                            event_dt = datetime.fromisoformat(clean)
+                            if event_dt.tzinfo is None:
+                                event_dt = event_dt.replace(tzinfo=ZoneInfo('UTC'))
+                        except ValueError:
+                            continue
+                        fire_utc = event_dt + timedelta(minutes=offset_min)
+
+                    if fire_utc <= now_utc:
+                        continue
+
+                    nudge_rows.append({
+                        'offset_minutes': offset_min,
+                        'scheduled_for': fire_utc.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                    })
+
+                if not nudge_rows:
+                    continue
+
+                attendees = ev.get('attendees', [])
+                attendees_json = _json.dumps(attendees) if attendees else None
+                description = ev.get('description') or ev.get('bodyPreview') or ev.get('body') or ''
+
+                created = _schedule_calendar_reminder_sequence(
+                    user_id, stable_id, title, start_iso, end_iso,
+                    is_all_day, attendees_json, description, nudge_rows
                 )
-                if nudge_rows:
-                    created = schedule_event_nudge_sequence(
-                        user_id, eid, title, event_start, event_end,
-                        is_all_day, attendees_json, description, nudge_rows
-                    )
-                    if created:
-                        logger.info(
-                            "sync_upcoming_calendar_nudges: created %d-row sequence for user=%s event='%s' start=%s",
-                            len(nudge_rows), user_id, title[:40], event_start
-                        )
+                if created:
+                    logger.info("sync_calendar_reminders: created %d-row sequence for user=%s event='%s' start=%s", len(nudge_rows), user_id, title[:40], start_iso)
 
         except Exception as e:
-            logger.error("sync_upcoming_calendar_nudges: error for user=%s: %s", user_id, repr(e))
+            logger.error("sync_calendar_reminders: error for user=%s: %s", user_id, repr(e))
 
-    logger.info("sync_upcoming_calendar_nudges: complete")
-
+    logger.info("sync_calendar_reminders: complete")
     try:
         from web.core.database import update_heartbeat as _update_heartbeat
-        _update_heartbeat("calendar-nudge-sync")
+        _update_heartbeat("calendar-reminder-sync")
     except Exception:
         pass
 
 
-async def process_calendar_event_nudges():
+@_with_duration_log("fire_calendar_reminders", 60)
+async def fire_calendar_reminders():
     """
-    Runs every 10 minutes. Fires due calendar event nudges with escalating tone.
-
-    For each due pending row:
-    1. Check if user has already acknowledged an earlier nudge in the sequence → cancel remaining
-    2. If grace row (offset_minutes=15): call Claude Haiku to decide whether to send
-    3. Build message based on offset_minutes
-    4. Deliver via NudgeService
-    5. Mark row as sent
+    Every 1 min: query due calendar reminders and deliver directly to the user.
+    Bypasses the nudge pipeline entirely. Delivery chain: Telegram -> Slack -> Push.
     """
-    from web.core.database import (
-        get_db, get_due_event_nudges, mark_event_nudge_sent, cancel_event_nudge_sequence
-    )
-    from web.services.nudge_service import NudgeService
+    from web.core.database import get_nudge_preferences
+    from web.services.calendar_reminder_service import CalendarReminderService
+    import json as _json
 
-    try:
-        due_rows = get_due_event_nudges()
-    except Exception as e:
-        logger.error("process_calendar_event_nudges: error fetching due rows: %s", repr(e))
-        return
+    _ensure_calendar_reminder_columns()
 
+    due_rows = _get_due_calendar_reminders()
     if not due_rows:
         return
 
-    logger.info("process_calendar_event_nudges: %d due rows to process", len(due_rows))
+    logger.info("fire_calendar_reminders: %d due rows to process", len(due_rows))
 
     for row in due_rows:
         row_id = row['id']
         user_id = row['user_id']
         event_id = row['event_id']
-        event_title = row['event_title']
+        event_title = row.get('event_title', 'Calendar Event')
         offset = row['offset_minutes']
-        is_all_day = bool(row['is_all_day'])
+        is_all_day = bool(row.get('is_all_day'))
         attendees_json = row.get('event_attendees') or '[]'
         description = row.get('event_description') or ''
 
         try:
-            # Step 1: Check for prior acknowledgement in this sequence
-            acknowledged = _check_event_acknowledged(user_id, event_id)
-            if acknowledged:
-                cancel_event_nudge_sequence(user_id, event_id)
-                logger.info("process_calendar_event_nudges: sequence acknowledged, cancelled remaining for event=%s user=%s", event_id, user_id)
+            # DND check (1-5am in user timezone)
+            prefs = get_nudge_preferences(user_id)
+            user_tz_str = prefs.get('digest_timezone') or 'America/Chicago'
+            try:
+                user_tz = ZoneInfo(user_tz_str)
+            except Exception:
+                user_tz = ZoneInfo('America/Chicago')
+
+            now_local = datetime.now(user_tz)
+            if 1 <= now_local.hour < 5:
+                _mark_calendar_reminder_cancelled(row_id, reason='dnd_window')
+                logger.info("fire_calendar_reminders: skipped row=%s (DND window %02d:%02d %s)", row_id, now_local.hour, now_local.minute, user_tz_str)
                 continue
 
-            # Step 2: Grace row — ask Haiku whether to send
-            if offset == 15:
-                should_send = await _should_send_grace_nudge(event_title, attendees_json, description)
-                if not should_send:
-                    # Mark as cancelled — Haiku decided it's not appropriate
-                    with get_db() as db:
-                        db.cursor().execute(
-                            "UPDATE calendar_event_nudges SET status='cancelled' WHERE id=%s",
-                            (row_id,)
-                        )
-                    continue
+            # Check acknowledgment
+            if _check_calendar_reminder_acknowledged(user_id, event_id):
+                _cancel_calendar_reminder_sequence(user_id, event_id)
+                logger.info("fire_calendar_reminders: sequence acknowledged, cancelled remaining for event=%s user=%s", event_id, user_id)
+                continue
 
-            # Step 3: Build message
-            title, body = _build_calendar_nudge_message(event_title, offset, is_all_day)
+            # Build message
+            try:
+                att_list = _json.loads(attendees_json) if attendees_json else []
+                has_attendees = len(att_list) > 0
+            except Exception:
+                att_list = []
+                has_attendees = False
 
-            # Step 4: Deliver
-            service = NudgeService(user_id)
-            result = await service.send_nudge(
-                nudge_type='calendar_event',
-                title=title,
-                body=body,
-                urgency='urgent' if offset in (-15, 15) else 'normal',
-                source_type='calendar_event_nudge',
-                source_id=row_id,
-            )
+            event_data = {
+                'summary': event_title,
+                'start': row.get('event_start', ''),
+                'end': row.get('event_end', ''),
+                'attendees': att_list,
+                'description': description,
+                'is_all_day': is_all_day,
+            }
 
-            # Step 5: Mark sent
-            if result.get('nudge_id'):
-                mark_event_nudge_sent(row_id, result['nudge_id'])
+            include_prep = (offset <= -60 and has_attendees)
+            svc = CalendarReminderService(user_id)
+            title, body = svc.build_reminder_message(event_data, offset, include_prep=include_prep)
+
+            # Deliver with fallback chain
+            success, channel, message_id = await _deliver_calendar_reminder(user_id, title, body)
+
+            if success:
+                _mark_calendar_reminder_sent(row_id, channel, telegram_message_id=message_id)
             else:
-                # Delivery failed — mark as cancelled so we don't retry indefinitely
-                with get_db() as db:
-                    db.cursor().execute(
-                        "UPDATE calendar_event_nudges SET status='cancelled' WHERE id=%s",
-                        (row_id,)
-                    )
+                _mark_calendar_reminder_cancelled(row_id, reason='delivery_failed')
 
         except Exception as e:
-            logger.error("process_calendar_event_nudges: error on row=%s event=%s: %s", row_id, event_id, repr(e))
+            logger.error("fire_calendar_reminders: error on row=%s event='%s': %s", row_id, event_title[:40], repr(e))
 
-
-def _check_event_acknowledged(user_id: int, event_id: str) -> bool:
-    """
-    Return True if any earlier sent nudge in this event's sequence was acted on.
-    Uses nudges.acted_at (set by Phase 37 reply threading when user responds).
-    """
-    from web.core.database import get_db
     try:
-        with get_db() as db:
-            result = db.cursor().execute("""
-                SELECT COUNT(*) FROM calendar_event_nudges cen
-                JOIN nudges n ON cen.nudge_id = n.id
-                WHERE cen.user_id = %s AND cen.event_id = %s
-                  AND cen.status = 'sent'
-                  AND n.acted_at IS NOT NULL
-            """, (user_id, event_id)).fetchone()
-        return result[0] > 0
-    except Exception as e:
-        logger.warning("_check_event_acknowledged error: %s", repr(e))
-        return False
+        from web.core.database import update_heartbeat as _update_heartbeat
+        _update_heartbeat("calendar-reminder-fire")
+    except Exception:
+        pass
 
 
-async def _should_send_grace_nudge(event_title: str, attendees_json: str, description: str) -> bool:
-    """
-    Ask Claude Haiku whether the grace period nudge is appropriate for this event.
-    Returns True to send, False to skip. Defaults to False on any error (fail safe).
-    """
-    import json
-    try:
-        import anthropic
-        attendees = json.loads(attendees_json) if attendees_json else []
-        attendee_str = ', '.join(attendees[:5]) if attendees else 'none listed'
-        desc_excerpt = description[:200] if description else 'no description'
-
-        prompt = (
-            f"Calendar event: '{event_title}'\n"
-            f"Attendees: {attendee_str}\n"
-            f"Description: {desc_excerpt}\n\n"
-            f"This event started about 15 minutes ago. Should I send the user a "
-            f"'you can probably still make it' nudge%s Answer YES or NO only."
-        )
-        client = anthropic.Anthropic()
-        response = client.messages.create(
-            model='claude-haiku-4-5-20251001',
-            max_tokens=10,
-            messages=[{'role': 'user', 'content': prompt}]
-        )
-        answer = response.content[0].text.strip().upper()
-        return answer.startswith('YES')
-    except Exception as e:
-        logger.warning("_should_send_grace_nudge Haiku call failed: %s", repr(e))
-        return False  # Fail safe: don't send if unsure
+# ---------------------------------------------------------------------------
+# END Calendar Reminder System
+# ---------------------------------------------------------------------------
 
 
-def _build_calendar_nudge_message(event_title: str, offset_minutes: int, is_all_day: bool) -> tuple[str, str]:
-    """
-    Return (title, body) for the nudge based on how far out the event is.
-    Tone escalates as the event approaches.
-    """
-    if is_all_day:
-        if offset_minutes <= -2880:
-            return f"In 2 days: {event_title}", f"Just a heads up — {event_title} is happening in 2 days."
-        elif offset_minutes <= -1440:
-            return f"Tomorrow: {event_title}", f"Tomorrow's the day — {event_title}. Anything you need to sort out before then?"
-        else:
-            return f"Today: {event_title}", f"{event_title} is today. Don't let it sneak up on you."
-    else:
-        if offset_minutes <= -240:
-            return f"In 4 hours: {event_title}", f"Hey — {event_title} is in 4 hours. Worth knowing it's coming."
-        elif offset_minutes <= -60:
-            return f"1 hour: {event_title}", f"One hour out — {event_title}. Anything you need to prep or pull together?"
-        elif offset_minutes <= -15:
-            return f"15 min: {event_title}", f"{event_title} starts in 15 minutes."
-        else:
-            return f"Still time: {event_title}", f"{event_title} started about 15 minutes ago — might still be worth joining."
+# OLD CALENDAR NUDGE CODE REMOVED (Phase 86-03 cutover)
+# _build_nudge_sequence, sync_upcoming_calendar_nudges,
+# process_calendar_event_nudges, _should_send_grace_nudge,
+# _check_event_acknowledged, _build_calendar_nudge_message
+# replaced by sync_calendar_reminders + fire_calendar_reminders above.
 
 
+@_with_duration_log("process_scheduled_notifications", 30)
 async def process_scheduled_notifications():
     """
     Process due scheduled notifications.
@@ -563,6 +744,7 @@ async def process_scheduled_notifications():
         logger.error(f"Error in notification processor: {repr(e)}")
 
 
+@_with_duration_log("process_task_reminders", 30)
 async def process_task_reminders():
     """
     Process due task reminders.
@@ -630,6 +812,7 @@ async def process_task_reminders():
         logger.error(f"Error in task reminder processor: {repr(e)}")
 
 
+@_with_duration_log("notification_job", 90)
 async def notification_job():
     """
     Combined job that processes both scheduled notifications and task reminders.
@@ -647,6 +830,7 @@ async def notification_job():
         logger.warning(f"notification_job took {duration:.1f}s — longer than 90s interval, may cause starvation")
 
 
+@_with_duration_log("process_daily_digests", 3600)
 async def process_daily_digests():
     """
     Process daily digests for users whose delivery time matches current hour.
@@ -694,6 +878,7 @@ async def process_daily_digests():
         logger.error(f"Error in daily digest processor: {repr(e)}")
 
 
+@_with_duration_log("process_weekly_reviews", 3600)
 async def process_weekly_reviews():
     """
     Process weekly reviews for users whose review day and time matches now.
@@ -751,6 +936,7 @@ def _sync_drive_for_scheduler(user_id: int, email: str):
         loop.close()
 
 
+@_with_duration_log("process_drive_sync", 14400)
 async def process_drive_sync():
     """Auto-sync Google Drive files for all users with connected accounts."""
     from web.core.database import list_gmail_tokens
@@ -777,6 +963,7 @@ async def process_drive_sync():
         logger.error(f"Error in Drive auto-sync processor: {repr(e)}")
 
 
+@_with_duration_log("process_scanner", 300)
 async def process_scanner(source: str):
     """
     Run a scanner job for a specific source across all users.
@@ -830,6 +1017,7 @@ async def process_scanner(source: str):
         logger.error(f"Error in scanner processor ({source}): {repr(e)}")
 
 
+@_with_duration_log("process_entity_resolution", 1800)
 async def process_entity_resolution():
     """
     Run entity resolution for all users.
@@ -864,6 +1052,7 @@ async def process_entity_resolution():
         logger.error(f"Error in entity resolution processor: {repr(e)}")
 
 
+@_with_duration_log("process_full_scan", 14400)
 async def process_full_scan():
     """
     Run all source scans + entity resolution for all users.
@@ -926,6 +1115,7 @@ async def _process_slack_bot():
     await process_slack_bot_messages()
 
 
+@_with_duration_log("process_inbound_classification", 600)
 async def process_inbound_classification():
     """
     Process newly scanned items through the classification pipeline.
@@ -968,6 +1158,7 @@ async def process_inbound_classification():
         logger.error("Inbound processing job error: %r", e)
 
 
+@_with_duration_log("process_meeting_prep", 900)
 async def process_meeting_prep():
     """Send pre-meeting briefings for events starting in 30-90 minutes."""
     from web.services.predictive_service import PredictiveService
@@ -1007,6 +1198,7 @@ async def process_meeting_prep():
         logger.error("Meeting prep job error: %r", e)
 
 
+@_with_duration_log("process_relationship_predictions", 86400)
 async def process_relationship_predictions():
     """Daily check for stale relationships and open follow-ups. Phase 27-02."""
     from web.services.predictive_service import PredictiveService
@@ -1042,6 +1234,7 @@ async def process_relationship_predictions():
         logger.error("Relationship predictions job error: %r", e)
 
 
+@_with_duration_log("process_nudge_followups", 14400)
 async def process_nudge_followups():
     """
     Follow up on overdue_task nudges that received no response in 4–24 hours.
@@ -1080,6 +1273,7 @@ async def process_nudge_followups():
         logger.error("Nudge followup job error: %r", e)
 
 
+@_with_duration_log("process_upcoming_task_nudges", 1800)
 async def process_upcoming_task_nudges():
     """
     Nudge about tasks due within the next 24–48 hours, before they go overdue.
@@ -1114,6 +1308,7 @@ async def process_upcoming_task_nudges():
         logger.error("Upcoming task nudge job error: %r", e)
 
 
+@_with_duration_log("process_ai_coach_nudges", 7200)
 async def process_ai_coach_nudges():
     """
     Send a smart focus-coaching nudge every 2–3 hours during waking hours.
@@ -1153,6 +1348,7 @@ async def process_ai_coach_nudges():
         logger.error("AI coach nudge job error: %r", e)
 
 
+@_with_duration_log("process_people_auto_tracker", 900)
 async def process_people_auto_tracker():
     """
     Auto-update People tracker from scanned communications.
@@ -1213,6 +1409,7 @@ async def process_people_auto_tracker():
         logger.error("People auto-tracker job error: %r", e)
 
 
+@_with_duration_log("process_urgent_nudges", 300)
 async def process_urgent_nudges():
     """
     Process urgent nudges for all users with nudge_enabled.
@@ -1274,6 +1471,7 @@ async def process_urgent_nudges():
         logger.error("Urgent nudge job error: %r", e)
 
 
+@_with_duration_log("process_batch_nudges", 3600)
 async def process_batch_nudges():
     """
     Process batch nudges for all users with nudge_enabled.
@@ -1333,6 +1531,7 @@ async def process_batch_nudges():
         logger.error("Batch nudge job error: %r", e)
 
 
+@_with_duration_log("process_drip_nudges", 900)
 async def process_drip_nudges():
     """
     Send one conversational check-in per user on drip interval.
@@ -1370,6 +1569,7 @@ async def process_drip_nudges():
         logger.error("Drip nudge job error: %r", e)
 
 
+@_with_duration_log("compute_user_patterns", 86400)
 async def compute_user_patterns():
     """
     Recompute pattern preferences for all users with recent feedback.
@@ -1421,6 +1621,7 @@ async def compute_user_patterns():
         logger.error("Pattern computation job error: %r", e)
 
 
+@_with_duration_log("run_embed_new_items", 1800)
 async def run_embed_new_items():
     from web.services.embedding_service import get_embedding_service
     try:
@@ -1433,6 +1634,7 @@ async def run_embed_new_items():
         logger.error(f"embed_new_items job failed: {repr(e)}")
 
 
+@_with_duration_log("send_pending_action_notifications", 300)
 async def send_pending_action_notifications():
     """
     Runs every 5 minutes. For each user with unnotified pending actions,
@@ -1538,6 +1740,7 @@ async def send_pending_action_notifications():
     _update_heartbeat("pending-action-notifications")
 
 
+@_with_duration_log("_run_nightly_research", 86400)
 async def _run_nightly_research():
     """4am nightly audit — measures feedback absorption fidelity for all users."""
     try:
@@ -1554,6 +1757,7 @@ async def _run_nightly_research():
         logger.error("[nightly_research] scheduler job failed: %s", repr(e))
 
 
+@_with_duration_log("check_system_health_and_alert", 3600)
 async def check_system_health_and_alert():
     """
     Hourly job: checks all monitored subsystems for staleness.
@@ -1715,6 +1919,7 @@ async def check_system_health_and_alert():
         logger.error("[health_alert] Job failed: %r", e)
 
 
+@_with_duration_log("_send_research_notification", 3600)
 async def _send_research_notification():
     """
     Hourly job: sends Telegram + Slack DM at 2pm local time when research_proposals are pending.
@@ -1836,7 +2041,7 @@ def start_scheduler():
         logger.warning("Scheduler already running")
         return
 
-    scheduler = AsyncIOScheduler()
+    scheduler = AsyncIOScheduler(job_defaults={'misfire_grace_time': 300})
 
     # Add notification processing job - runs every 90 seconds
     scheduler.add_job(
@@ -2273,34 +2478,32 @@ def start_scheduler():
         print("✓ Slack bot using Events API mode (polling disabled)")
 
     # ========================================================================
-    # Calendar → Nudge Bridge
+    # Calendar Reminder System (Phase 86)
+    # Independent calendar reminders with direct delivery (replaces old nudge bridge)
     # ========================================================================
 
-    # Sync upcoming calendar events, reconcile deleted/rescheduled, and schedule
-    # nudge sequences: hourly with jitter (Phase 72-01)
     scheduler.add_job(
-        sync_upcoming_calendar_nudges,
-        IntervalTrigger(minutes=60, jitter=60),
-        id='calendar_nudge_sync',
-        name='Calendar Nudge Sync (hourly)',
+        sync_calendar_reminders,
+        IntervalTrigger(minutes=10, jitter=30),
+        id='calendar_reminder_sync',
+        name='Calendar Reminder Sync (every 10 min)',
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=3600,
         coalesce=True,
     )
-    logger.info("Scheduler: Calendar nudge sync job registered (hourly)")
+    logger.info("Scheduler: Calendar reminder sync job registered (every 10 min)")
 
-    # Fire due calendar event nudges: every 10 minutes
     scheduler.add_job(
-        process_calendar_event_nudges,
-        IntervalTrigger(minutes=10, jitter=30),
-        id='calendar_nudge_processor',
-        name='Calendar Nudge Processor (every 10 min)',
+        fire_calendar_reminders,
+        IntervalTrigger(minutes=1),
+        id='calendar_reminder_fire',
+        name='Calendar Reminder Fire (every 1 min)',
         replace_existing=True,
         max_instances=1,
         coalesce=True,
     )
-    logger.info("Scheduler: Calendar nudge processor registered (every 10 min)")
+    logger.info("Scheduler: Calendar reminder fire job registered (every 1 min)")
 
     # ========================================================================
     # Email Draft Scanner — Email Drafting
@@ -2356,7 +2559,7 @@ def start_scheduler():
     print("✓ Pattern computation job registered (daily at 3am)")
     print("✓ People auto-tracker job registered (every 15 min)")
     print("✓ Meeting prep briefing job registered (every 15 min)")
-    print("✓ Phase 39: Calendar nudge sync (daily) + processor (every 10 min) registered")
+    print("✓ Phase 86: Calendar reminder sync (every 10 min) + fire (every 1 min) registered")
     print("✓ Phase 45: Email draft scanner job registered (every 6 hours at :20)")
     print("✓ Pending action notification job registered (every 5 min)")
     # Note: Telegram and Slack bot modes (polling vs webhook) printed above where decided

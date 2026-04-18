@@ -35,10 +35,18 @@ from web.core.database import (
     list_google_tokens,
     record_screen_dismissal,
     get_user_profile,
+    get_calendar_reminder_by_telegram_id,
+    acknowledge_calendar_reminder_sequence,
 )
 from src.core.config import Config
 
 logger = logging.getLogger(__name__)
+
+
+def is_calendar_reminder_message(telegram_message_id: str, user_id: int) -> bool:
+    """Check if a Telegram message ID corresponds to a calendar reminder."""
+    row = get_calendar_reminder_by_telegram_id(telegram_message_id, user_id)
+    return row is not None
 
 # Module-level state for update tracking
 _last_update_id = 0
@@ -164,11 +172,24 @@ class TelegramBotWorker:
             logger.debug(f"Telegram chat disabled for user {user_id}, ignoring message")
             return
 
+        # Check if this is a reply to a calendar reminder (highest-priority reply type).
+        # Any reply cancels remaining reminders in the sequence.
+        reply_to = message.get("reply_to_message", {})
+        reply_message_id = reply_to.get("message_id")
+
+        if reply_message_id and is_calendar_reminder_message(str(reply_message_id), user_id):
+            await self._handle_calendar_reminder_reply(
+                telegram_message_id=str(reply_message_id),
+                user_id=user_id,
+                chat_id=chat_id,
+                reply_text=text,
+            )
+            return
+
         # Check if this is a reply to a screen agent nudge — route through Claude with context
         # Two detection paths:
         #   1. Swipe-reply: user explicitly replied to the screen nudge message
         #   2. Recency: screen nudge was sent within last 5 min and user just typed a message
-        reply_to = message.get("reply_to_message", {})
         reply_message_id = reply_to.get("message_id") if reply_to else None
 
         is_screen_reply = False
@@ -329,6 +350,47 @@ class TelegramBotWorker:
                 chat_id,
                 "I'm taking longer than expected to process that. "
                 "Please try again in a moment."
+            )
+
+    async def _handle_calendar_reminder_reply(
+        self,
+        telegram_message_id: str,
+        user_id: int,
+        chat_id: int,
+        reply_text: str,
+    ) -> None:
+        """Handle a reply to a calendar reminder by acknowledging the sequence.
+
+        Any reply to a calendar reminder cancels all remaining pending reminders
+        for that event. Sends a brief confirmation back to the user.
+        """
+        try:
+            row = get_calendar_reminder_by_telegram_id(telegram_message_id, user_id)
+            if not row:
+                logger.warning(
+                    "Calendar reminder reply: no row found for telegram_message_id=%s user=%s",
+                    telegram_message_id, user_id,
+                )
+                return
+
+            event_id = row['event_id']
+            event_title = row.get('event_title', 'your event')
+
+            cancelled_count = acknowledge_calendar_reminder_sequence(user_id, event_id)
+            logger.info(
+                "Calendar reminder acknowledged for '%s', cancelled %d remaining reminders (user=%s)",
+                event_title, cancelled_count, user_id,
+            )
+
+            await self.bot_service.send_message(
+                chat_id,
+                f"Got it, no more reminders for {event_title}.",
+                parse_mode=None,
+            )
+        except Exception as e:
+            logger.error(
+                "Calendar reminder reply handling failed for user %s: %s",
+                user_id, repr(e),
             )
 
     async def _handle_screen_nudge_reply(

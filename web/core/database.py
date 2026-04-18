@@ -59,7 +59,8 @@ def _get_pg_pool() -> psycopg2.pool.SimpleConnectionPool:
             maxconn=10,
             dsn=database_url,
             cursor_factory=psycopg2.extras.RealDictCursor,
-            options="-c timezone=UTC"
+            options="-c timezone=UTC -c statement_timeout=300000",
+            connect_timeout=10,
         )
     return _pg_pool
 
@@ -1910,6 +1911,8 @@ def init_db() -> None:
                 screen_agent_enabled INTEGER DEFAULT 0,
                 browser_agent_enabled INTEGER DEFAULT 0,
                 personality_casual INTEGER DEFAULT 0,
+                calendar_reminder_offsets_timed TEXT DEFAULT NULL,
+                calendar_reminder_offsets_allday TEXT DEFAULT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -2872,6 +2875,39 @@ def get_db():
         conn.rollback()
         raise
     finally:
+        pool.putconn(conn)
+
+
+@contextmanager
+def get_db_long_timeout():
+    """Context manager with extended statement_timeout for long-running jobs.
+
+    Uses the same connection pool as get_db() but overrides the session-level
+    statement_timeout to 600000ms (10 minutes) for jobs like nightly research,
+    full scan sweeps, and pattern computation that legitimately need more time.
+
+    The timeout is reset automatically when the connection returns to the pool
+    because PostgreSQL session settings are per-connection and the pool-level
+    options re-apply on the next getconn().
+    """
+    pool = _get_pg_pool()
+    conn = pool.getconn()
+    conn.autocommit = False
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SET statement_timeout TO '600000'")
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        # Reset to pool default before returning connection
+        try:
+            conn.cursor().execute("SET statement_timeout TO '300000'")
+            conn.commit()
+        except Exception:
+            pass
         pool.putconn(conn)
 
 
@@ -12388,3 +12424,254 @@ def get_last_audit_run(user_id: int) -> Optional[dict]:
     except Exception as e:
         _audit_logger.error("get_last_audit_run error for user %d: %s", user_id, repr(e))
         return None
+
+
+# ---------------------------------------------------------------------------
+# Calendar Reminder System (Phase 86)
+# ---------------------------------------------------------------------------
+
+_cal_reminder_logger = logging.getLogger("calendar_reminder")
+
+
+def get_user_connected_emails(user_id: int) -> list:
+    """
+    Collect all email addresses associated with a user across connected
+    calendar accounts (Google + Microsoft) plus the primary login email.
+
+    Returns a deduplicated lowercase list.
+    """
+    emails = set()
+
+    # Primary login email
+    try:
+        user = get_user_by_id(user_id)
+        if user and user.get("email"):
+            emails.add(user["email"].lower())
+    except Exception as e:
+        _cal_reminder_logger.warning(
+            "get_user_connected_emails: primary email lookup failed: %s", repr(e)
+        )
+
+    # Google tokens with calendar scope
+    try:
+        google_tokens = list_google_tokens(user_id)
+        for tok in google_tokens:
+            scopes = tok.get("scopes", "")
+            if "calendar" in scopes.lower():
+                email = tok.get("email", "")
+                if email:
+                    emails.add(email.lower())
+    except Exception as e:
+        _cal_reminder_logger.warning(
+            "get_user_connected_emails: google tokens lookup failed: %s", repr(e)
+        )
+
+    # Microsoft tokens with calendar scope
+    try:
+        ms_tokens = list_microsoft_tokens(user_id)
+        for tok in ms_tokens:
+            scopes = tok.get("scopes", "")
+            if "calendar" in scopes.lower():
+                email = tok.get("email", "")
+                if email:
+                    emails.add(email.lower())
+    except Exception as e:
+        _cal_reminder_logger.warning(
+            "get_user_connected_emails: microsoft tokens lookup failed: %s", repr(e)
+        )
+
+    return list(emails)
+
+
+def get_calendar_reminder_offsets(user_id: int) -> dict:
+    """
+    Read the user's calendar reminder offset preferences.
+
+    Returns:
+        {"timed": [-60, -15], "allday": [-1440, 0]}
+        with defaults if no preference is stored.
+    """
+    defaults = {
+        "timed": [-60, -15],
+        "allday": [-1440, 0],
+    }
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT calendar_reminder_offsets_timed,
+                       calendar_reminder_offsets_allday
+                FROM user_settings
+                WHERE user_id = %s
+            """, (user_id,))
+            row = cursor.fetchone()
+
+            if not row:
+                return defaults
+
+            result = {}
+
+            # Timed offsets
+            raw_timed = row.get("calendar_reminder_offsets_timed")
+            if raw_timed:
+                try:
+                    parsed = json.loads(raw_timed)
+                    if isinstance(parsed, list) and all(isinstance(v, int) for v in parsed):
+                        result["timed"] = parsed
+                    else:
+                        result["timed"] = defaults["timed"]
+                except (json.JSONDecodeError, TypeError):
+                    result["timed"] = defaults["timed"]
+            else:
+                result["timed"] = defaults["timed"]
+
+            # All-day offsets
+            raw_allday = row.get("calendar_reminder_offsets_allday")
+            if raw_allday:
+                try:
+                    parsed = json.loads(raw_allday)
+                    if isinstance(parsed, list) and all(isinstance(v, int) for v in parsed):
+                        result["allday"] = parsed
+                    else:
+                        result["allday"] = defaults["allday"]
+                except (json.JSONDecodeError, TypeError):
+                    result["allday"] = defaults["allday"]
+            else:
+                result["allday"] = defaults["allday"]
+
+            return result
+
+    except Exception as e:
+        _cal_reminder_logger.error("get_calendar_reminder_offsets error: %s", repr(e))
+        return defaults
+
+
+def update_calendar_reminder_offsets(
+    user_id: int,
+    timed: Optional[list] = None,
+    allday: Optional[list] = None,
+) -> bool:
+    """
+    Update the user's calendar reminder offset preferences.
+
+    Validates that all values are integers and within expected ranges.
+    Stores as JSON text in user_settings.
+
+    Returns True on success.
+    """
+    # Validation
+    if timed is not None:
+        if not isinstance(timed, list):
+            raise ValueError("timed must be a list of integers")
+        for v in timed:
+            if not isinstance(v, int):
+                raise ValueError("timed offset must be integer, got %s" % type(v).__name__)
+            if v >= 0:
+                raise ValueError("timed offset must be negative, got %d" % v)
+
+    if allday is not None:
+        if not isinstance(allday, list):
+            raise ValueError("allday must be a list of integers")
+        for v in allday:
+            if not isinstance(v, int):
+                raise ValueError("allday offset must be integer, got %s" % type(v).__name__)
+            if v > 0:
+                raise ValueError("allday offset must be <= 0, got %d" % v)
+
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+
+            # Ensure row exists
+            cursor.execute("""
+                INSERT INTO user_settings (user_id)
+                VALUES (%s)
+                ON CONFLICT DO NOTHING
+            """, (user_id,))
+
+            updates = []
+            params = []
+
+            if timed is not None:
+                updates.append("calendar_reminder_offsets_timed = %s")
+                params.append(json.dumps(timed))
+
+            if allday is not None:
+                updates.append("calendar_reminder_offsets_allday = %s")
+                params.append(json.dumps(allday))
+
+            if not updates:
+                return True
+
+            updates.append("updated_at = CURRENT_TIMESTAMP")
+            params.append(user_id)
+
+            sql = "UPDATE user_settings SET " + ", ".join(updates) + " WHERE user_id = %s"
+            cursor.execute(sql, params)
+
+            conn.commit()
+            return True
+
+    except ValueError:
+        raise
+    except Exception as e:
+        _cal_reminder_logger.error("update_calendar_reminder_offsets error: %s", repr(e))
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Calendar Reminder Reply Handling (Phase 86-03)
+# ---------------------------------------------------------------------------
+
+def get_calendar_reminder_by_telegram_id(telegram_message_id: str, user_id: int):
+    """Look up a calendar_event_nudges row by its Telegram message ID.
+
+    Returns the row as a dict or None if not found. Used by the Telegram bot
+    worker to detect whether a reply is to a calendar reminder message.
+    """
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, user_id, event_id, event_title, status, acknowledged
+                FROM calendar_event_nudges
+                WHERE telegram_message_id = %s AND user_id = %s
+                LIMIT 1
+                """,
+                (telegram_message_id, user_id),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    except Exception as e:
+        _cal_reminder_logger.error(
+            "get_calendar_reminder_by_telegram_id error: %s", repr(e)
+        )
+        return None
+
+
+def acknowledge_calendar_reminder_sequence(user_id: int, event_id: str) -> int:
+    """Cancel all remaining pending reminders for an event after user acknowledgment.
+
+    Sets status='cancelled' and acknowledged=TRUE on every pending row in the
+    sequence. Returns the number of rows updated.
+    """
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE calendar_event_nudges
+                SET status = 'cancelled', acknowledged = TRUE
+                WHERE user_id = %s AND event_id = %s AND status = 'pending'
+                """,
+                (user_id, event_id),
+            )
+            count = cursor.rowcount
+            conn.commit()
+            return count
+    except Exception as e:
+        _cal_reminder_logger.error(
+            "acknowledge_calendar_reminder_sequence error: %s", repr(e)
+        )
+        return 0
