@@ -10,7 +10,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request, status, Depends
 from pydantic import BaseModel, EmailStr, field_validator
 import bcrypt
-from web.core.database import create_user, get_user_by_email, get_db
+from web.core.database import create_user, get_user_by_email, get_user_count, get_db
 from web.auth.jwt_utils import create_access_token, verify_token, require_auth
 from web.core.rate_limit import limiter
 
@@ -90,6 +90,15 @@ async def register(request: Request, body: RegisterRequest):
         - Email uniqueness enforced by database constraint
         - Minimum password length: 8 characters
     """
+    # Block registration once a user already exists.
+    # This keeps the first-user bootstrap flow working while preventing
+    # public unlimited-account creation on deployments like Railway.
+    if get_user_count() > 0:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Registration is closed. This Seny instance already has an owner."
+        )
+
     # Hash the password (bcrypt automatically generates salt)
     # SECURITY: Never store plaintext passwords!
     # bcrypt has a max password length of 72 bytes, truncate if needed
