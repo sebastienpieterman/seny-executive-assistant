@@ -2,6 +2,7 @@
 API route definitions for Seny.
 """
 
+import logging
 from typing import Optional
 from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel
@@ -15,6 +16,8 @@ from web.core.database import (
     get_user_profile
 )
 from web.api.settings import get_user_settings
+
+logger = logging.getLogger(__name__)
 
 # Create API router
 router = APIRouter()
@@ -344,6 +347,21 @@ async def chat(request: ChatRequest, user_id: str = Depends(require_auth)):
 
             # Dismissed nudges: any auto-dismissed as stale in last 24h
             # Surface these so user can correct wrong calls
+            def _get_row_value(row, key, index=0):
+                if row is None:
+                    return None
+                if isinstance(row, dict):
+                    return row.get(key)
+                if hasattr(row, 'get'):
+                    try:
+                        return row.get(key)
+                    except Exception:
+                        pass
+                try:
+                    return row[index]
+                except Exception:
+                    return None
+
             try:
                 from web.core.database import get_db
                 with get_db() as conn:
@@ -359,7 +377,7 @@ async def chat(request: ChatRequest, user_id: str = Depends(require_auth)):
                 if dismissed_rows:
                     dismissed_count = len(dismissed_rows)
                     dismissed_titles = ", ".join(
-                        (row['title'] if isinstance(row, dict) else row[0]) or '(no title)'
+                        (_get_row_value(row, 'title') or '(no title)')
                         for row in dismissed_rows
                     )
                     context_parts.append(
@@ -367,8 +385,7 @@ async def chat(request: ChatRequest, user_id: str = Depends(require_auth)):
                         f" — {dismissed_titles}. Mention these if relevant and the user can correct any wrong calls.]"
                     )
             except Exception as _dismissed_err:
-                import logging as _log
-                _log.getLogger(__name__).warning("Failed to load dismissed nudges for context: %s", repr(_dismissed_err))
+                logger.warning("Failed to load dismissed nudges for context: %s", repr(_dismissed_err))
 
             # LCD Layer 2: recent narrations synthesized into current state
             try:
@@ -654,7 +671,7 @@ YOU MUST NOW CALL THE APPROPRIATE TOOL. Do NOT respond with text only. Call the 
         )
 
     except ClaudeServiceError as e:
-        # Handle our custom service errors
+        logger.exception("ClaudeServiceError while handling /api/chat")
         error_msg = str(e)
         if "rate limit" in error_msg.lower():
             raise HTTPException(
@@ -673,6 +690,7 @@ YOU MUST NOW CALL THE APPROPRIATE TOOL. Do NOT respond with text only. Call the 
             )
 
     except APIError as e:
+        logger.exception("Anthropic APIError while handling /api/chat")
         # Handle Anthropic API errors
         status_code = getattr(e, 'status_code', 500)
 
@@ -695,6 +713,7 @@ YOU MUST NOW CALL THE APPROPRIATE TOOL. Do NOT respond with text only. Call the 
     except Exception as e:
         # Catch any unexpected errors
         import traceback
+        logger.exception("Unexpected error while handling /api/chat")
         print(f"[CHAT ERROR] {type(e).__name__}: {str(e)}\n{traceback.format_exc()}", flush=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

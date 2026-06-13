@@ -1,0 +1,60 @@
+[1mdiff --git a/web/api/auth.py b/web/api/auth.py[m
+[1mindex 3787332..1d089aa 100644[m
+[1m--- a/web/api/auth.py[m
+[1m+++ b/web/api/auth.py[m
+[36m@@ -10,7 +10,7 @@[m [mfrom typing import Optional[m
+ from fastapi import APIRouter, HTTPException, Request, status, Depends[m
+ from pydantic import BaseModel, EmailStr, field_validator[m
+ import bcrypt[m
+[31m-from web.core.database import create_user, get_user_by_email, get_db[m
+[32m+[m[32mfrom web.core.database import create_user, get_user_by_email, get_user_count, get_db[m
+ from web.auth.jwt_utils import create_access_token, verify_token, require_auth[m
+ from web.core.rate_limit import limiter[m
+ [m
+[36m@@ -90,6 +90,15 @@[m [masync def register(request: Request, body: RegisterRequest):[m
+         - Email uniqueness enforced by database constraint[m
+         - Minimum password length: 8 characters[m
+     """[m
+[32m+[m[32m    # Block registration once a user already exists.[m
+[32m+[m[32m    # This keeps the first-user bootstrap flow working while preventing[m
+[32m+[m[32m    # public unlimited-account creation on deployments like Railway.[m
+[32m+[m[32m    if get_user_count() > 0:[m
+[32m+[m[32m        raise HTTPException([m
+[32m+[m[32m            status_code=status.HTTP_403_FORBIDDEN,[m
+[32m+[m[32m            detail="Registration is closed. This Seny instance already has an owner."[m
+[32m+[m[32m        )[m
+[32m+[m
+     # Hash the password (bcrypt automatically generates salt)[m
+     # SECURITY: Never store plaintext passwords![m
+     # bcrypt has a max password length of 72 bytes, truncate if needed[m
+[1mdiff --git a/web/core/database.py b/web/core/database.py[m
+[1mindex 325f6e0..f6c2b27 100644[m
+[1m--- a/web/core/database.py[m
+[1m+++ b/web/core/database.py[m
+[36m@@ -3027,6 +3027,26 @@[m [mdef get_user_by_email(email: str) -> Optional[dict]:[m
+         }[m
+ [m
+ [m
+[32m+[m[32mdef get_user_count() -> int:[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Return the number of registered users.[m
+[32m+[m
+[32m+[m[32m    This helper is used by the registration guard to allow bootstrap[m
+[32m+[m[32m    registration only when no users exist.[m
+[32m+[m[32m    """[m
+[32m+[m[32m    with get_db() as conn:[m
+[32m+[m[32m        cursor = conn.cursor()[m
+[32m+[m[32m        cursor.execute("SELECT COUNT(*) AS count FROM users")[m
+[32m+[m[32m        row = cursor.fetchone()[m
+[32m+[m[32m        if row is None:[m
+[32m+[m[32m            return 0[m
+[32m+[m
+[32m+[m[32m        # psycopg2 RealDictCursor returns a mapping, sqlite3.Row may be tuple-like[m
+[32m+[m[32m        if isinstance(row, dict):[m
+[32m+[m[32m            return int(row.get("count", 0))[m
+[32m+[m[32m        return int(row[0])[m
+[32m+[m
+[32m+[m
+ def get_user_by_id(user_id: int) -> Optional[dict]:[m
+     """[m
+     Retrieve a user by ID.[m

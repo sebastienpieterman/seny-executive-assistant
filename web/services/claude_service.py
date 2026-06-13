@@ -8178,15 +8178,15 @@ content_json shapes:
 
         except APIError as e:
             # Log full error details before re-raising
-            print(f"[ERROR] Claude API Error: {str(e)}")
-            print(f"[ERROR] Error type: {type(e).__name__}")
+            logger.exception("Claude API Error in ClaudeService.send_message")
             if hasattr(e, 'body'):
-                print(f"[ERROR] Error body: {e.body}")
+                logger.error("Claude API error body: %s", e.body)
             raise e
 
         except Exception as e:
-            # Catch any unexpected errors
-            raise ClaudeServiceError(f"Unexpected error: {str(e)}")
+            # Catch any unexpected errors and preserve traceback
+            logger.exception("Unexpected error in ClaudeService.send_message")
+            raise ClaudeServiceError(f"Unexpected error: {str(e)}") from e
 
     async def chat(
         self,
