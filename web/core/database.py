@@ -3027,6 +3027,26 @@ def get_user_by_email(email: str) -> Optional[dict]:
         }
 
 
+def get_user_count() -> int:
+    """
+    Return the number of registered users.
+
+    This helper is used by the registration guard to allow bootstrap
+    registration only when no users exist.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS count FROM users")
+        row = cursor.fetchone()
+        if row is None:
+            return 0
+
+        # psycopg2 RealDictCursor returns a mapping, sqlite3.Row may be tuple-like
+        if isinstance(row, dict):
+            return int(row.get("count", 0))
+        return int(row[0])
+
+
 def get_user_by_id(user_id: int) -> Optional[dict]:
     """
     Retrieve a user by ID.
