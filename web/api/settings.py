@@ -282,7 +282,7 @@ async def update_profile(
 
         # Ensure user_settings row exists
         cursor.execute(
-            "INSERT OR IGNORE INTO user_settings (user_id) VALUES (%s)",
+            "INSERT INTO user_settings (user_id) VALUES (%s) ON CONFLICT DO NOTHING",
             (int(user_id),)
         )
 
