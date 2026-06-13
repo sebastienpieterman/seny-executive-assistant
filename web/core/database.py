@@ -3027,6 +3027,15 @@ def get_user_by_email(email: str) -> Optional[dict]:
         }
 
 
+def get_user_count() -> int:
+    """Return the total number of registered users."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS cnt FROM users")
+        row = cur.fetchone()
+        return row["cnt"] if row else 0
+
+
 def get_user_by_id(user_id: int) -> Optional[dict]:
     """
     Retrieve a user by ID.
