@@ -3027,6 +3027,28 @@ def get_user_by_email(email: str) -> Optional[dict]:
         }
 
 
+def _get_first_count_from_row(row) -> int:
+    """Return the first count value from a fetchone() row object."""
+    if not row:
+        return 0
+
+    if hasattr(row, "keys"):
+        if "count" in row:
+            return int(row["count"])
+        if "total" in row:
+            return int(row["total"])
+        row_values = row.values() if hasattr(row, "values") else dict(row).values()
+        try:
+            return int(next(iter(row_values)))
+        except StopIteration:
+            return 0
+
+    try:
+        return int(row[0])
+    except Exception:
+        return 0
+
+
 def get_user_count() -> int:
     """
     Return the number of registered users.
@@ -5566,7 +5588,7 @@ def get_local_file_stats(user_id: int) -> dict:
             SELECT COUNT(*) FROM local_files
             WHERE user_id = %s AND is_deleted = 0
         """, (user_id,))
-        total = cursor.fetchone()[0]
+        total = _get_first_count_from_row(cursor.fetchone())
 
         # By extension (top 20)
         cursor.execute("""
@@ -11892,8 +11914,7 @@ def count_pending_actions(user_id: int, status: str = 'pending') -> int:
                 SELECT COUNT(*) FROM pending_actions
                 WHERE user_id = %s AND status = %s
             """, (user_id, status))
-            row = cursor.fetchone()
-            return row[0] if row else 0
+            return _get_first_count_from_row(cursor.fetchone())
     except Exception as e:
         _pending_actions_logger.error("count_pending_actions error: %s", repr(e))
         return 0
