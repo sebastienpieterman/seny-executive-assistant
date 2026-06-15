@@ -72,28 +72,6 @@ def _score_to_label(score: float) -> str:
         return 'frequently dismissed (suppressed)'
 
 
-def _extract_user_instruction_text(user_message) -> str:
-    """Extract plain text from the user's message payload for logging."""
-    if user_message is None:
-        return ''
-
-    if isinstance(user_message, list):
-        return ' '.join(
-            block.get('text', '') for block in user_message
-            if isinstance(block, dict)
-        ).strip()
-
-    return str(user_message).strip()
-
-
-def _find_last_user_message(messages: list) -> str:
-    """Return the last user message content from a list of Claude messages."""
-    for msg in reversed(messages):
-        if isinstance(msg, dict) and msg.get('role') == 'user':
-            return msg.get('content', '')
-    return ''
-
-
 class ClaudeService:
     """Async service for interacting with Claude API."""
 
@@ -241,84 +219,6 @@ class ClaudeService:
                                 }
                             },
                             'required': ['message_id']
-                        }
-                    })
-                    tools.append({
-                        'name': 'gmail_search_messages',
-                        'description': "Search the user's Gmail using Gmail query syntax. Returns email summaries and message IDs. This tool is read-only and does not change any email state. Use include_read_state to also return unread/read status for each result.",
-                        'input_schema': {
-                            'type': 'object',
-                            'properties': {
-                                'query': {
-                                    'type': 'string',
-                                    'description': "Gmail search query. Use 'in:inbox' prefix for inbox-only searches (recommended for most requests)."
-                                },
-                                'include_read_state': {
-                                    'type': 'boolean',
-                                    'description': 'If true, include unread/read state for each matching email.'
-                                },
-                                'max_results': {
-                                    'type': 'integer',
-                                    'description': 'Maximum number of matching emails to return (default 10).'
-                                },
-                                'email_account': {
-                                    'type': 'string',
-                                    'description': account_desc
-                                }
-                            },
-                            'required': ['query']
-                        }
-                    })
-                    tools.append({
-                        'name': 'gmail_mark_read',
-                        'description': "Mark Gmail messages as read. Provide message_ids or a query to identify matching emails. This tool only changes read/unread state and never archives, trashes, deletes, labels, moves, or sends email.",
-                        'input_schema': {
-                            'type': 'object',
-                            'properties': {
-                                'message_ids': {
-                                    'type': 'array',
-                                    'items': {'type': 'string'},
-                                    'description': 'Gmail message IDs to mark as read.'
-                                },
-                                'query': {
-                                    'type': 'string',
-                                    'description': 'Optional Gmail search query to select messages to mark as read.'
-                                },
-                                'email_account': {
-                                    'type': 'string',
-                                    'description': account_desc
-                                }
-                            },
-                            'anyOf': [
-                                {'required': ['message_ids']},
-                                {'required': ['query']}
-                            ]
-                        }
-                    })
-                    tools.append({
-                        'name': 'gmail_mark_unread',
-                        'description': "Mark Gmail messages as unread. Provide message_ids or a query to identify matching emails. This tool only changes read/unread state and never archives, trashes, deletes, labels, moves, or sends email.",
-                        'input_schema': {
-                            'type': 'object',
-                            'properties': {
-                                'message_ids': {
-                                    'type': 'array',
-                                    'items': {'type': 'string'},
-                                    'description': 'Gmail message IDs to mark as unread.'
-                                },
-                                'query': {
-                                    'type': 'string',
-                                    'description': 'Optional Gmail search query to select messages to mark as unread.'
-                                },
-                                'email_account': {
-                                    'type': 'string',
-                                    'description': account_desc
-                                }
-                            },
-                            'anyOf': [
-                                {'required': ['message_ids']},
-                                {'required': ['query']}
-                            ]
                         }
                     })
                     tools.append({
@@ -3451,7 +3351,6 @@ content_json shapes:
 
                 # Process each tool and collect results
                 tool_results = []
-                user_message = _find_last_user_message(messages)
 
                 for tool_use_block in tool_use_blocks:
                     tool_result = None
@@ -3539,93 +3438,6 @@ content_json shapes:
                                         tool_result += f"- {att['filename']} ({att['mimeType']}, {att['size']} bytes)\n"
                             else:
                                 tool_result = f"Could not retrieve email with ID: {message_id}"
-
-                    elif tool_use_block.name == 'gmail_search_messages':
-                        query = tool_use_block.input.get('query', '')
-                        include_read_state = tool_use_block.input.get('include_read_state', False)
-                        max_results = tool_use_block.input.get('max_results', 10)
-                        email_account = tool_use_block.input.get('email_account')
-
-                        # Use specified account or default to first connected
-                        if not email_account and connected_accounts:
-                            email_account = connected_accounts[0]['email']
-
-                        if not email_account:
-                            tool_result = "No Gmail account connected. Please connect your Gmail account first."
-                        elif not query:
-                            tool_result = "Gmail search query is required."
-                        else:
-                            gmail = GmailService(user_id, email_account)
-                            results = await gmail.search_emails(query, max_results)
-
-                            if results:
-                                tool_result = f"Found {len(results)} message(s) matching query: {query}\n\n"
-                                for i, email in enumerate(results, 1):
-                                    unread_flag = ' (Unread)' if 'UNREAD' in email.get('labelIds', []) else ''
-                                    tool_result += f"{i}. {email['subject']}{unread_flag}\n"
-                                    tool_result += f"   From: {email['from']}\n"
-                                    tool_result += f"   Date: {email['date']}\n"
-                                    if include_read_state:
-                                        tool_result += f"   Read state: {'Unread' if 'UNREAD' in email.get('labelIds', []) else 'Read'}\n"
-                                    tool_result += f"   Message ID: {email['id']}\n\n"
-                            else:
-                                tool_result = f"No emails found matching query: {query}"
-
-                    elif tool_use_block.name == 'gmail_mark_read':
-                        message_ids = tool_use_block.input.get('message_ids')
-                        query = tool_use_block.input.get('query')
-                        email_account = tool_use_block.input.get('email_account')
-                        if isinstance(message_ids, str):
-                            message_ids = [message_ids]
-
-                        if not email_account and connected_accounts:
-                            email_account = connected_accounts[0]['email']
-
-                        if not email_account:
-                            tool_result = "No Gmail account connected. Please connect your Gmail account first."
-                        elif not message_ids and not query:
-                            tool_result = "Provide message_ids or a query to mark messages as read."
-                        else:
-                            gmail = GmailService(user_id, email_account)
-                            user_instruction = _extract_user_instruction_text(user_message)
-                            count = await gmail.mark_read_batch(
-                                message_ids=message_ids,
-                                query=query,
-                                user_instruction=user_instruction
-                            )
-                            tool_result = f"Marked {count} message(s) as read."
-                            if query:
-                                tool_result += f" Query used: {query}"
-                            if message_ids:
-                                tool_result += f" Message IDs: {', '.join(message_ids[:10])}"
-
-                    elif tool_use_block.name == 'gmail_mark_unread':
-                        message_ids = tool_use_block.input.get('message_ids')
-                        query = tool_use_block.input.get('query')
-                        email_account = tool_use_block.input.get('email_account')
-                        if isinstance(message_ids, str):
-                            message_ids = [message_ids]
-
-                        if not email_account and connected_accounts:
-                            email_account = connected_accounts[0]['email']
-
-                        if not email_account:
-                            tool_result = "No Gmail account connected. Please connect your Gmail account first."
-                        elif not message_ids and not query:
-                            tool_result = "Provide message_ids or a query to mark messages as unread."
-                        else:
-                            gmail = GmailService(user_id, email_account)
-                            user_instruction = _extract_user_instruction_text(user_message)
-                            count = await gmail.mark_unread_batch(
-                                message_ids=message_ids,
-                                query=query,
-                                user_instruction=user_instruction
-                            )
-                            tool_result = f"Marked {count} message(s) as unread."
-                            if query:
-                                tool_result += f" Query used: {query}"
-                            if message_ids:
-                                tool_result += f" Message IDs: {', '.join(message_ids[:10])}"
 
                     elif tool_use_block.name == 'email_send':
                         # Send an email or reply
