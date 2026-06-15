@@ -278,21 +278,22 @@ class ClaudeService:
                                 'message_ids': {
                                     'type': 'array',
                                     'items': {'type': 'string'},
-                                    'description': 'Gmail message IDs to mark as read.'
+                                    'description': 'Optional specific Gmail message IDs to mark read.'
                                 },
                                 'query': {
                                     'type': 'string',
-                                    'description': 'Optional Gmail search query to select messages to mark as read.'
+                                    'description': 'Optional Gmail search query to find messages when message_ids are not provided.'
                                 },
                                 'email_account': {
                                     'type': 'string',
                                     'description': account_desc
+                                },
+                                'user_instruction': {
+                                    'type': 'string',
+                                    'description': 'Original user instruction for logging.'
                                 }
                             },
-                            'anyOf': [
-                                {'required': ['message_ids']},
-                                {'required': ['query']}
-                            ]
+                            'required': []
                         }
                     })
                     tools.append({
@@ -304,21 +305,22 @@ class ClaudeService:
                                 'message_ids': {
                                     'type': 'array',
                                     'items': {'type': 'string'},
-                                    'description': 'Gmail message IDs to mark as unread.'
+                                    'description': 'Optional specific Gmail message IDs to mark unread.'
                                 },
                                 'query': {
                                     'type': 'string',
-                                    'description': 'Optional Gmail search query to select messages to mark as unread.'
+                                    'description': 'Optional Gmail search query to find messages when message_ids are not provided.'
                                 },
                                 'email_account': {
                                     'type': 'string',
                                     'description': account_desc
+                                },
+                                'user_instruction': {
+                                    'type': 'string',
+                                    'description': 'Original user instruction for logging.'
                                 }
                             },
-                            'anyOf': [
-                                {'required': ['message_ids']},
-                                {'required': ['query']}
-                            ]
+                            'required': []
                         }
                     })
                     tools.append({
@@ -3587,7 +3589,7 @@ content_json shapes:
                             tool_result = "Provide message_ids or a query to mark messages as read."
                         else:
                             gmail = GmailService(user_id, email_account)
-                            user_instruction = _extract_user_instruction_text(user_message)
+                            user_instruction = tool_use_block.input.get('user_instruction') or _extract_user_instruction_text(user_message)
                             count = await gmail.mark_read_batch(
                                 message_ids=message_ids,
                                 query=query,
@@ -3615,7 +3617,7 @@ content_json shapes:
                             tool_result = "Provide message_ids or a query to mark messages as unread."
                         else:
                             gmail = GmailService(user_id, email_account)
-                            user_instruction = _extract_user_instruction_text(user_message)
+                            user_instruction = tool_use_block.input.get('user_instruction') or _extract_user_instruction_text(user_message)
                             count = await gmail.mark_unread_batch(
                                 message_ids=message_ids,
                                 query=query,
