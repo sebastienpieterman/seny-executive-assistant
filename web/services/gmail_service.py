@@ -837,3 +837,140 @@ class GmailService:
         except HttpError as e:
             logger.error(f"Failed to mark email {message_id} as unread: {e}")
             return False
+
+    async def _search_message_ids(self, query: str, max_results: int = 100) -> list[str]:
+        """
+        Search for Gmail message IDs matching a query.
+
+        Args:
+            query: Gmail search query.
+            max_results: Maximum number of matching message IDs to return.
+
+        Returns:
+            List of Gmail message IDs.
+        """
+        service = await self.get_service()
+        if not service:
+            return []
+
+        max_results = min(max(1, max_results), 500)
+        message_ids: list[str] = []
+        page_token = None
+
+        try:
+            while True:
+                params = {
+                    'userId': 'me',
+                    'q': query,
+                    'maxResults': min(max_results - len(message_ids), 100)
+                }
+                if page_token:
+                    params['pageToken'] = page_token
+
+                results = self._execute_with_backoff(
+                    service.users().messages().list(**params)
+                )
+                if not results:
+                    break
+
+                messages = results.get('messages', [])
+                for msg in messages:
+                    if msg.get('id'):
+                        message_ids.append(msg['id'])
+                        if len(message_ids) >= max_results:
+                            break
+
+                page_token = results.get('nextPageToken')
+                if not page_token or len(message_ids) >= max_results:
+                    break
+
+            return message_ids
+        except HttpError as e:
+            logger.error(f"Gmail search for message IDs failed: {e}")
+            return []
+
+    async def mark_read_batch(
+        self,
+        message_ids: list[str] | None = None,
+        query: str | None = None,
+        user_instruction: str | None = None
+    ) -> int:
+        """
+        Mark multiple Gmail messages as read.
+
+        Args:
+            message_ids: Optional list of message IDs.
+            query: Optional Gmail search query to find messages.
+            user_instruction: Optional original instruction for logging.
+
+        Returns:
+            Number of messages successfully marked as read.
+        """
+        if user_instruction:
+            logger.info(f"Gmail mark_read_batch instruction: {user_instruction}")
+
+        final_ids: list[str] = []
+        if message_ids:
+            final_ids.extend(message_ids)
+
+        if query:
+            query_ids = await self._search_message_ids(query, max_results=100)
+            final_ids.extend(query_ids)
+
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        unique_ids: list[str] = []
+        for mid in final_ids:
+            if mid and mid not in seen:
+                seen.add(mid)
+                unique_ids.append(mid)
+
+        count = 0
+        for mid in unique_ids:
+            if await self.mark_read(mid):
+                count += 1
+
+        return count
+
+    async def mark_unread_batch(
+        self,
+        message_ids: list[str] | None = None,
+        query: str | None = None,
+        user_instruction: str | None = None
+    ) -> int:
+        """
+        Mark multiple Gmail messages as unread.
+
+        Args:
+            message_ids: Optional list of message IDs.
+            query: Optional Gmail search query to find messages.
+            user_instruction: Optional original instruction for logging.
+
+        Returns:
+            Number of messages successfully marked as unread.
+        """
+        if user_instruction:
+            logger.info(f"Gmail mark_unread_batch instruction: {user_instruction}")
+
+        final_ids: list[str] = []
+        if message_ids:
+            final_ids.extend(message_ids)
+
+        if query:
+            query_ids = await self._search_message_ids(query, max_results=100)
+            final_ids.extend(query_ids)
+
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        unique_ids: list[str] = []
+        for mid in final_ids:
+            if mid and mid not in seen:
+                seen.add(mid)
+                unique_ids.append(mid)
+
+        count = 0
+        for mid in unique_ids:
+            if await self.mark_unread(mid):
+                count += 1
+
+        return count
