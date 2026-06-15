@@ -334,6 +334,190 @@ class GmailService:
             logger.error(f"Gmail search failed: {e}")
             return []
 
+    async def get_message_metadata(self, message_id: str) -> Optional[dict]:
+        """
+        Fetch basic metadata for a single message.
+
+        Args:
+            message_id: Gmail message ID
+
+        Returns:
+            Metadata dict with id, threadId, from, to, subject, date, labelIds
+        """
+        service = await self.get_service()
+        if not service:
+            return None
+
+        try:
+            msg_data = self._execute_with_backoff(
+                service.users().messages().get(
+                    userId='me',
+                    id=message_id,
+                    format='metadata',
+                    metadataHeaders=['From', 'To', 'Subject', 'Date']
+                )
+            )
+
+            if not msg_data:
+                return None
+
+            headers = {
+                h['name'].lower(): h['value']
+                for h in msg_data['payload'].get('headers', [])
+            }
+
+            return {
+                'id': msg_data.get('id', ''),
+                'threadId': msg_data.get('threadId', ''),
+                'from': headers.get('from', ''),
+                'to': headers.get('to', ''),
+                'subject': headers.get('subject', '(no subject)'),
+                'date': headers.get('date', ''),
+                'labelIds': msg_data.get('labelIds', [])
+            }
+        except HttpError as e:
+            logger.warning(f"Failed to fetch metadata for message {message_id}: {e}")
+            return None
+
+    async def search_message_ids(self, query: str, max_results: Optional[int] = None) -> list[str]:
+        """
+        Search Gmail and return matching message IDs.
+
+        Args:
+            query: Gmail search query
+            max_results: Maximum number of message IDs to return. If omitted, returns all matching IDs.
+
+        Returns:
+            List of Gmail message IDs matching the query.
+        """
+        service = await self.get_service()
+        if not service:
+            return []
+
+        message_ids: list[str] = []
+        page_token = None
+
+        while True:
+            remaining = None if max_results is None else max(1, max_results - len(message_ids))
+            page_size = 500 if remaining is None else min(500, remaining)
+
+            params = {
+                'userId': 'me',
+                'q': query,
+                'maxResults': page_size
+            }
+            if page_token:
+                params['pageToken'] = page_token
+
+            results = self._execute_with_backoff(
+                service.users().messages().list(**params)
+            )
+
+            if not results:
+                break
+
+            for msg in results.get('messages', []):
+                message_ids.append(msg['id'])
+                if max_results is not None and len(message_ids) >= max_results:
+                    break
+
+            if max_results is not None and len(message_ids) >= max_results:
+                break
+
+            page_token = results.get('nextPageToken')
+            if not page_token:
+                break
+
+        return message_ids
+
+    async def mark_read_batch(
+        self,
+        message_ids: Optional[list[str]] = None,
+        query: Optional[str] = None,
+        user_instruction: Optional[str] = None
+    ) -> int:
+        """
+        Mark multiple Gmail messages as read.
+
+        Args:
+            message_ids: Specific message IDs to mark as read
+            query: Optional Gmail query to select additional messages
+            user_instruction: Original user instruction for logging
+
+        Returns:
+            Number of messages successfully marked as read
+        """
+        if message_ids is None:
+            message_ids = []
+
+        if query:
+            query_ids = await self.search_message_ids(query)
+            message_ids = list(dict.fromkeys(message_ids + query_ids))
+
+        success_count = 0
+        for message_id in message_ids:
+            if await self.mark_read(message_id):
+                metadata = await self.get_message_metadata(message_id)
+                subject = metadata.get('subject') if metadata else ''
+                sender = metadata.get('from') if metadata else ''
+                logger.info(
+                    "Gmail mutation: user_id=%s account=%s action=mark_read message_id=%s subject=%s sender=%s query=%s instruction=%s",
+                    self.user_id,
+                    self.email,
+                    message_id,
+                    subject,
+                    sender,
+                    query,
+                    user_instruction
+                )
+                success_count += 1
+
+        return success_count
+
+    async def mark_unread_batch(
+        self,
+        message_ids: Optional[list[str]] = None,
+        query: Optional[str] = None,
+        user_instruction: Optional[str] = None
+    ) -> int:
+        """
+        Mark multiple Gmail messages as unread.
+
+        Args:
+            message_ids: Specific message IDs to mark as unread
+            query: Optional Gmail query to select additional messages
+            user_instruction: Original user instruction for logging
+
+        Returns:
+            Number of messages successfully marked as unread
+        """
+        if message_ids is None:
+            message_ids = []
+
+        if query:
+            query_ids = await self.search_message_ids(query)
+            message_ids = list(dict.fromkeys(message_ids + query_ids))
+
+        success_count = 0
+        for message_id in message_ids:
+            if await self.mark_unread(message_id):
+                metadata = await self.get_message_metadata(message_id)
+                subject = metadata.get('subject') if metadata else ''
+                sender = metadata.get('from') if metadata else ''
+                logger.info(
+                    "Gmail mutation: user_id=%s account=%s action=mark_unread message_id=%s subject=%s sender=%s query=%s instruction=%s",
+                    self.user_id,
+                    self.email,
+                    message_id,
+                    subject,
+                    sender,
+                    query,
+                    user_instruction
+                )
+                success_count += 1
+
+        return success_count
+
     async def read_email(self, message_id: str) -> Optional[dict]:
         """
         Get full email content by message ID.
