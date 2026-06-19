@@ -3486,6 +3486,12 @@ def save_google_token(user_id: int, email: str, credentials) -> None:
     """
     Save or update Google OAuth credentials for a specific email account.
 
+    Important:
+        Google does not always return a refresh_token on every OAuth callback
+        or token refresh. Never overwrite an existing refresh_token with None
+        or an empty value, otherwise Google integrations will work only until
+        the access token expires.
+
     Args:
         user_id: User's unique identifier
         email: Google account email being connected
@@ -3494,6 +3500,7 @@ def save_google_token(user_id: int, email: str, credentials) -> None:
     Security:
         - Uses parameterized queries to prevent SQL injection
         - Tokens are stored per-user per-email, ensuring data isolation
+        - Does not log token values
     """
     with get_db() as conn:
         cursor = conn.cursor()
@@ -3506,12 +3513,37 @@ def save_google_token(user_id: int, email: str, credentials) -> None:
         # Convert scopes list to comma-separated string
         scopes_str = ','.join(credentials.scopes) if credentials.scopes else ''
 
-        # Check if this email already exists (update) or is new (insert)
-        cursor.execute("SELECT id FROM google_tokens WHERE email = %s", (email,))
+        # Check if this exact user/email token already exists.
+        # Do not match on email only: the same Google account could theoretically
+        # be connected by different Seny users.
+        cursor.execute(
+            "SELECT id, refresh_token FROM google_tokens WHERE user_id = %s AND email = %s",
+            (user_id, email)
+        )
         existing = cursor.fetchone()
 
+        def _row_get(row, key, index):
+            if row is None:
+                return None
+            try:
+                return row[key]
+            except (KeyError, TypeError):
+                return row[index]
+
+        existing_refresh_token = _row_get(existing, "refresh_token", 1)
+        incoming_refresh_token = credentials.refresh_token
+
+        # Preserve existing refresh token when Google does not return a new one.
+        refresh_token_to_save = incoming_refresh_token or existing_refresh_token
+
+        if not refresh_token_to_save:
+            raise ValueError(
+                f"No Google refresh token available for {email}. "
+                "Reconnect with prompt=consent/access_type=offline required."
+            )
+
         if existing:
-            # Update existing token
+            # Update existing token, preserving refresh_token if Google omitted it
             cursor.execute("""
                 UPDATE google_tokens
                 SET access_token = %s, refresh_token = %s, token_uri = %s,
@@ -3519,7 +3551,7 @@ def save_google_token(user_id: int, email: str, credentials) -> None:
                 WHERE email = %s AND user_id = %s
             """, (
                 credentials.token,
-                credentials.refresh_token,
+                refresh_token_to_save,
                 credentials.token_uri,
                 scopes_str,
                 expiry_str,
@@ -3527,7 +3559,7 @@ def save_google_token(user_id: int, email: str, credentials) -> None:
                 user_id
             ))
         else:
-            # Insert new token
+            # Insert new token. New connections must have a refresh token.
             cursor.execute("""
                 INSERT INTO google_tokens
                 (user_id, email, access_token, refresh_token, token_uri, scopes, expiry)
@@ -3536,7 +3568,7 @@ def save_google_token(user_id: int, email: str, credentials) -> None:
                 user_id,
                 email,
                 credentials.token,
-                credentials.refresh_token,
+                refresh_token_to_save,
                 credentials.token_uri,
                 scopes_str,
                 expiry_str
